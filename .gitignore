@@ -1,0 +1,88 @@
+# Python environments and packaging
+.venv/
+.env/
+venv/
+env/
+ENV/
+.python-version
+.pdm-python
+.direnv/
+
+# Python caches and build outputs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*$py.class
+*.egg-info/
+.eggs/
+develop-eggs/
+*.egg
+pip-wheel-metadata/
+MANIFEST
+*.whl
+*.tar.gz
+site/
+parts/
+sdist/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+*.cover
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+pytestdebug.log
+*.prof
+*.lprof
+build/
+dist/
+
+# Generated local datasets and command output
+output/
+*.parquet.tmp
+
+# Jupyter and notebook runtime files
+.ipynb_checkpoints/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Operating-system files
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+
+# IDE metadata
+.idea/
+.vscode/
+
+
+# Project verification output and transient sample writes
+reports/
+sample_dataset/*.lock
+sample_dataset/_state/*.lock
+sample_dataset/**/*.inprogress
+sample_dataset/**/*.tmp-*

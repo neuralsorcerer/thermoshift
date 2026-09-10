@@ -1,0 +1,11 @@
+{
+  "manifest_sha256": "d1846166403453ac87bad872e512be6ff83d0159602f7e8dfc213d4ee2ad3b47",
+  "metadata_sha256": {
+    "DATASHEET.md": "fda1df6f4537d296d7bbca74912f6a5be5590c2b327be761304349c4a3e15f10",
+    "LICENSE": "0d3d176415ecb22fbb9f9c2126261af34c73d69e721de98cbfea7bfe5702430f",
+    "README.md": "da5645abd05003c3d4f7f7e7defd7e4bc2a0872e9669d9fa621b12e29140b989",
+    "feature_roles.json": "7fbb70d63e2d8cb64281684a2b81ef214e604c188044b05d4b04f59a98516547",
+    "run_config.json": "412010e73dfb8634770336a4a569923dde7b2bf1cffdb2ab35a3d1ef95551b55",
+    "schema.json": "7211092bb9f8f3c7d2a4c76924173bf5fb945a9a1b98b309144582b8fd04e81b"
+  }
+}

@@ -1,0 +1,22 @@
+name: Python checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev,hub,analysis,notebook]'
+      - run: python -m pip check
+      - run: python -m ruff check src tests examples scripts benchmarks
+      - run: python -m ruff format --check src tests examples scripts benchmarks
+      - run: python scripts/update_schema.py --check
+      - run: python -m pytest -q
+      - run: python -m build
+      - run: python scripts/check_distribution.py

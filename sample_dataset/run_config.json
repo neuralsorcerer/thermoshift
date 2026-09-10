@@ -1,0 +1,23 @@
+{
+  "config": {
+    "carbon_weight": 0.05,
+    "comfort_weight": 0.3,
+    "compression": "zstd",
+    "compression_level": 3,
+    "episode_steps": 168,
+    "exploration": 0.15,
+    "hidden_confounding": false,
+    "rows": 50003,
+    "schema_version": "2.0",
+    "seed": 42,
+    "shard_buildings": 16384
+  },
+  "fingerprint": "11b11ad6e22f099a937182f50fd84774d7679576860cced9f2ab87d758161ef3",
+  "runtime": {
+    "numpy": "2.3.5",
+    "pyarrow": "25.0.1",
+    "python": "3.12.14",
+    "thermoshift-synth": "0.1.0"
+  },
+  "source_sha256": "3a591af174b2887a79cbb24e1a605a5c76f335cfb0ddfb21fb3c7731e20a5271"
+}

@@ -1,0 +1,97 @@
+{
+  "files": [
+    {
+      "bytes": 383269,
+      "kind": "logged",
+      "path": "data/logged/test/00000/part-00000000.parquet",
+      "rows": 4032,
+      "sha256": "890e88f45e608f19b6a86e22bff48c8bd8a2b344ce0722407b58fef503fc405c",
+      "shard_id": 0,
+      "split": "test"
+    },
+    {
+      "bytes": 189366,
+      "kind": "logged",
+      "path": "data/logged/test_heatwave/00000/part-00000000.parquet",
+      "rows": 1848,
+      "sha256": "deb04e21cec47c5107b41d4ebef08e69f29c94a043bd36bbf315a5891072db06",
+      "shard_id": 0,
+      "split": "test_heatwave"
+    },
+    {
+      "bytes": 386132,
+      "kind": "logged",
+      "path": "data/logged/test_sensor/00000/part-00000000.parquet",
+      "rows": 4139,
+      "sha256": "bae73829fda029634425e94eb9a1f476adce54c1101e9f26fb37723b9a051664",
+      "shard_id": 0,
+      "split": "test_sensor"
+    },
+    {
+      "bytes": 3373304,
+      "kind": "logged",
+      "path": "data/logged/train/00000/part-00000000.parquet",
+      "rows": 35616,
+      "sha256": "3c9a43c792be9413d6a88efc5ce19d8e6304984b2bfa7a29a4222b90effaf0bd",
+      "shard_id": 0,
+      "split": "train"
+    },
+    {
+      "bytes": 416613,
+      "kind": "logged",
+      "path": "data/logged/validation/00000/part-00000000.parquet",
+      "rows": 4368,
+      "sha256": "c223e8572f77cd9183ca2e45886e85208c814bfd6a319581d6bc80031cbf969d",
+      "shard_id": 0,
+      "split": "validation"
+    },
+    {
+      "bytes": 413835,
+      "kind": "oracle",
+      "path": "data/oracle/test/00000/part-00000000.parquet",
+      "rows": 4032,
+      "sha256": "697af55d40e0e680b057079c68cefcc3c142a3ec2089a218d85e51756d3627eb",
+      "shard_id": 0,
+      "split": "test"
+    },
+    {
+      "bytes": 204931,
+      "kind": "oracle",
+      "path": "data/oracle/test_heatwave/00000/part-00000000.parquet",
+      "rows": 1848,
+      "sha256": "b48b8407e143d2ab9352f2082318026496674075e4dc0439118d22e515fcf25c",
+      "shard_id": 0,
+      "split": "test_heatwave"
+    },
+    {
+      "bytes": 430239,
+      "kind": "oracle",
+      "path": "data/oracle/test_sensor/00000/part-00000000.parquet",
+      "rows": 4139,
+      "sha256": "5b4227c2feb6d552ba6eb240814aacebe6ec656b788fd8a745eb8cf3d91c5bca",
+      "shard_id": 0,
+      "split": "test_sensor"
+    },
+    {
+      "bytes": 3668857,
+      "kind": "oracle",
+      "path": "data/oracle/train/00000/part-00000000.parquet",
+      "rows": 35616,
+      "sha256": "caaa905cd4828cf4fb591de231fbbf260f206121ad38da8bd3fe9f37673fb4b2",
+      "shard_id": 0,
+      "split": "train"
+    },
+    {
+      "bytes": 450246,
+      "kind": "oracle",
+      "path": "data/oracle/validation/00000/part-00000000.parquet",
+      "rows": 4368,
+      "sha256": "dbb0709a8c536303aea21db33000aee5320314fafdbf1798ee93731c70575c95",
+      "shard_id": 0,
+      "split": "validation"
+    }
+  ],
+  "fingerprint": "11b11ad6e22f099a937182f50fd84774d7679576860cced9f2ab87d758161ef3",
+  "provenance_sha256": "412010e73dfb8634770336a4a569923dde7b2bf1cffdb2ab35a3d1ef95551b55",
+  "shard_id": 0
+}

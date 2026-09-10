@@ -1,0 +1,12 @@
+include LICENSE README.md CONTRIBUTING.md constraints.txt
+recursive-include src/thermoshift/resources *.md
+recursive-include docs *.md
+recursive-include examples *.py
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include notebooks *.ipynb
+recursive-include benchmarks *.py *.md
+prune sample_dataset
+prune build
+prune dist
+global-exclude *.py[cod] __pycache__

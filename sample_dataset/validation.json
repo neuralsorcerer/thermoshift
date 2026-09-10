@@ -1,0 +1,112 @@
+{
+  "buildings": 298,
+  "bytes": 9916792,
+  "checks": [
+    "complete row coverage",
+    "schema and nullability",
+    "SHA-256 integrity",
+    "unique IDs and disjoint building splits",
+    "trajectory continuity",
+    "action positivity",
+    "factual-counterfactual consistency",
+    "thermal/electrical balance",
+    "cost/carbon/reward equations",
+    "cooling monotonicity",
+    "sensor missingness and fault labels",
+    "oracle one-step optimality",
+    "deterministic building replay with matching source/runtime"
+  ],
+  "files": 10,
+  "findings": [],
+  "fingerprint": "11b11ad6e22f099a937182f50fd84774d7679576860cced9f2ab87d758161ef3",
+  "manifest_sha256": "d1846166403453ac87bad872e512be6ff83d0159602f7e8dfc213d4ee2ad3b47",
+  "replay": true,
+  "rows": 50003,
+  "scope": "full",
+  "seconds": 19.84266156199965,
+  "split_profiles": {
+    "test": {
+      "action_counts": [
+        1841,
+        1291,
+        900
+      ],
+      "mean_energy_kwh": 2.2521912202567957,
+      "mean_logged_reward": -0.7243828374253459,
+      "mean_one_step_regret": 0.31077347295672914,
+      "mean_outdoor_c": 29.081080417784435,
+      "null_sensor_rate": 0.01314484126984127,
+      "outage_rate": 0.002232142857142857,
+      "rows": 4032,
+      "true_temp_max_c": 32.26521682739258,
+      "true_temp_min_c": 14.79273509979248
+    },
+    "test_heatwave": {
+      "action_counts": [
+        285,
+        647,
+        916
+      ],
+      "mean_energy_kwh": 3.2960681840696764,
+      "mean_logged_reward": -2.3668915427133776,
+      "mean_one_step_regret": 0.3581666145393085,
+      "mean_outdoor_c": 37.321290815031375,
+      "null_sensor_rate": 0.023809523809523808,
+      "outage_rate": 0.012445887445887446,
+      "rows": 1848,
+      "true_temp_max_c": 38.32816696166992,
+      "true_temp_min_c": 20.396013259887695
+    },
+    "test_sensor": {
+      "action_counts": [
+        1913,
+        1308,
+        918
+      ],
+      "mean_energy_kwh": 2.1651908889121265,
+      "mean_logged_reward": -1.5769439567634027,
+      "mean_one_step_regret": 0.5256376971197492,
+      "mean_outdoor_c": 28.696269290405183,
+      "null_sensor_rate": 0.34935974873157766,
+      "outage_rate": 0.00362406378352259,
+      "rows": 4139,
+      "true_temp_max_c": 35.36382293701172,
+      "true_temp_min_c": 8.191791534423828
+    },
+    "train": {
+      "action_counts": [
+        16203,
+        11466,
+        7947
+      ],
+      "mean_energy_kwh": 2.0813273154748253,
+      "mean_logged_reward": -0.747105676003023,
+      "mean_one_step_regret": 0.2891548734550722,
+      "mean_outdoor_c": 28.864006938317395,
+      "null_sensor_rate": 0.015835579514824796,
+      "outage_rate": 0.004829290206648697,
+      "rows": 35616,
+      "true_temp_max_c": 34.47294235229492,
+      "true_temp_min_c": 10.563581466674805
+    },
+    "validation": {
+      "action_counts": [
+        1950,
+        1477,
+        941
+      ],
+      "mean_energy_kwh": 1.9564680523842901,
+      "mean_logged_reward": -0.6949464082503881,
+      "mean_one_step_regret": 0.27593133288381055,
+      "mean_outdoor_c": 29.1302288936608,
+      "null_sensor_rate": 0.019230769230769232,
+      "outage_rate": 0.0018315018315018315,
+      "rows": 4368,
+      "true_temp_max_c": 31.79054832458496,
+      "true_temp_min_c": 13.760693550109863
+    }
+  },
+  "status": "passed",
+  "validator_source_sha256": "3a591af174b2887a79cbb24e1a605a5c76f335cfb0ddfb21fb3c7731e20a5271",
+  "validator_version": "0.1.0"
+}

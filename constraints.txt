@@ -1,0 +1,17 @@
+# Dependency versions for a reproducible development environment.
+numpy==2.3.5
+pyarrow==25.0.1
+filelock==3.32.6
+PyYAML==6.0.3
+huggingface_hub==1.30.0
+datasets==5.0.1
+scikit-learn==1.8.0
+pandas==2.2.3
+pytest==9.1.1
+nbformat==5.11.1
+ipykernel==7.3.0
+build==1.6.0
+portalocker==3.2.0
+scipy==1.17.0
+ruff==0.16.6
+IPython==9.17.1

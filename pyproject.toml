@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thermoshift-synth"
+dynamic = ["version"]
+authors = [{name = "Soumyadip Sarkar"}]
+description = "Synthetic Cooling Trajectories and Counterfactual Outcomes for Machine Learning"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["synthetic-data", "time-series", "counterfactual", "parquet", "energy"]
+dependencies = [
+    "numpy>=2.0,<3",
+    "pyarrow>=19,<26",
+    "filelock>=3.16,<4",
+    "portalocker>=3.2,<4",
+    "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+hub = ["huggingface_hub>=1.30,<2", "datasets>=5,<6"]
+analysis = ["scikit-learn>=1.5,<2", "pandas>=2.2,<3"]
+notebook = ["nbformat>=5.10,<6", "ipykernel>=6,<8", "IPython>=8,<10"]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "ruff>=0.16,<0.17", "scipy>=1.11,<2"]
+
+[project.scripts]
+thermoshift = "thermoshift.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "thermoshift._version.__version__"}
+
+[tool.setuptools.package-data]
+thermoshift = ["resources/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]

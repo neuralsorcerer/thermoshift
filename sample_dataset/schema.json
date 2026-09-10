@@ -1,0 +1,502 @@
+{
+  "logged": [
+    {
+      "description": "building_id * episode_steps + step; unique within a release",
+      "dtype": "int64",
+      "name": "row_id",
+      "nullable": false,
+      "role": "id",
+      "unit": "1"
+    },
+    {
+      "description": "Independent synthetic building, one trajectory per building",
+      "dtype": "int64",
+      "name": "building_id",
+      "nullable": false,
+      "role": "id",
+      "unit": "1"
+    },
+    {
+      "description": "Zero-based hour within the trajectory",
+      "dtype": "int32",
+      "name": "step",
+      "nullable": false,
+      "role": "id",
+      "unit": "h"
+    },
+    {
+      "description": "Synthetic local hour, no geographic timezone",
+      "dtype": "int8",
+      "name": "hour",
+      "nullable": false,
+      "role": "feature",
+      "unit": "h"
+    },
+    {
+      "description": "Synthetic weekday: Monday=0",
+      "dtype": "int8",
+      "name": "day_of_week",
+      "nullable": false,
+      "role": "feature",
+      "unit": "1"
+    },
+    {
+      "description": "0=residential-like, 1=office-like",
+      "dtype": "int8",
+      "name": "building_type",
+      "nullable": false,
+      "role": "feature",
+      "unit": "1"
+    },
+    {
+      "description": "Known floor area",
+      "dtype": "float",
+      "name": "floor_area_m2",
+      "nullable": false,
+      "role": "feature",
+      "unit": "m2"
+    },
+    {
+      "description": "Rated electric cooling input at action 2",
+      "dtype": "float",
+      "name": "hvac_capacity_kw",
+      "nullable": false,
+      "role": "feature",
+      "unit": "kW"
+    },
+    {
+      "description": "Constant preferred temperature for the episode",
+      "dtype": "float",
+      "name": "setpoint_c",
+      "nullable": false,
+      "role": "feature",
+      "unit": "degC"
+    },
+    {
+      "description": "Outdoor temperature held constant over the next hour",
+      "dtype": "float",
+      "name": "outdoor_temp_c",
+      "nullable": false,
+      "role": "feature",
+      "unit": "degC"
+    },
+    {
+      "description": "Synthetic solar irradiance",
+      "dtype": "float",
+      "name": "solar_w_m2",
+      "nullable": false,
+      "role": "feature",
+      "unit": "W/m2"
+    },
+    {
+      "description": "Known hourly illustrative tariff",
+      "dtype": "float",
+      "name": "price_per_kwh",
+      "nullable": false,
+      "role": "feature",
+      "unit": "currency/kWh"
+    },
+    {
+      "description": "Known illustrative grid carbon intensity",
+      "dtype": "float",
+      "name": "carbon_kg_per_kwh",
+      "nullable": false,
+      "role": "feature",
+      "unit": "kgCO2e/kWh"
+    },
+    {
+      "description": "Idealized observable occupancy, constant this hour",
+      "dtype": "int16",
+      "name": "occupancy_count",
+      "nullable": false,
+      "role": "feature",
+      "unit": "people"
+    },
+    {
+      "description": "Supply availability known at the decision time",
+      "dtype": "bool",
+      "name": "grid_available",
+      "nullable": false,
+      "role": "feature",
+      "unit": "1"
+    },
+    {
+      "description": "Current corrupted sensor measurement; null during dropout",
+      "dtype": "float",
+      "name": "obs_temp_c",
+      "nullable": true,
+      "role": "feature",
+      "unit": "degC"
+    },
+    {
+      "description": "Latest available reading, initially setpoint if missing",
+      "dtype": "float",
+      "name": "obs_temp_last_c",
+      "nullable": false,
+      "role": "feature",
+      "unit": "degC"
+    },
+    {
+      "description": "Hours since available reading; increments from 1 on initial dropout",
+      "dtype": "int32",
+      "name": "sensor_age_steps",
+      "nullable": false,
+      "role": "feature",
+      "unit": "h"
+    },
+    {
+      "description": "0=off, 1=half input, 2=full input",
+      "dtype": "int8",
+      "name": "action",
+      "nullable": false,
+      "role": "action",
+      "unit": "1"
+    },
+    {
+      "description": "Float64 probability used by the actual logging policy for the selected action",
+      "dtype": "double",
+      "name": "propensity",
+      "nullable": false,
+      "role": "propensity",
+      "unit": "1"
+    },
+    {
+      "description": "Float64 logging probability used to sample action 0",
+      "dtype": "double",
+      "name": "p_action_0",
+      "nullable": false,
+      "role": "propensity",
+      "unit": "1"
+    },
+    {
+      "description": "Float64 logging probability used to sample action 1",
+      "dtype": "double",
+      "name": "p_action_1",
+      "nullable": false,
+      "role": "propensity",
+      "unit": "1"
+    },
+    {
+      "description": "Float64 logging probability used to sample action 2",
+      "dtype": "double",
+      "name": "p_action_2",
+      "nullable": false,
+      "role": "propensity",
+      "unit": "1"
+    },
+    {
+      "description": "Simulated true temperature at the end of the hour",
+      "dtype": "float",
+      "name": "y_next_temp_c",
+      "nullable": false,
+      "role": "target",
+      "unit": "degC"
+    },
+    {
+      "description": "Served background plus HVAC electricity over one hour",
+      "dtype": "float",
+      "name": "y_energy_kwh",
+      "nullable": false,
+      "role": "target",
+      "unit": "kWh"
+    },
+    {
+      "description": "Served electricity cost",
+      "dtype": "float",
+      "name": "y_cost",
+      "nullable": false,
+      "role": "target",
+      "unit": "currency"
+    },
+    {
+      "description": "Operational grid emissions for served electricity",
+      "dtype": "float",
+      "name": "y_carbon_kg",
+      "nullable": false,
+      "role": "target",
+      "unit": "kgCO2e"
+    },
+    {
+      "description": "End-of-hour deviation beyond the setpoint +/-1 degC comfort band",
+      "dtype": "float",
+      "name": "y_discomfort_c",
+      "nullable": false,
+      "role": "target",
+      "unit": "degC"
+    },
+    {
+      "description": "Negative weighted electricity, emissions and endpoint comfort cost",
+      "dtype": "float",
+      "name": "y_reward",
+      "nullable": false,
+      "role": "target",
+      "unit": "currency-equivalent"
+    },
+    {
+      "description": "Final stored step of the building trajectory",
+      "dtype": "bool",
+      "name": "episode_end",
+      "nullable": false,
+      "role": "boundary",
+      "unit": "1"
+    }
+  ],
+  "oracle": [
+    {
+      "description": "building_id * episode_steps + step; unique within a release",
+      "dtype": "int64",
+      "name": "row_id",
+      "nullable": false,
+      "role": "id",
+      "unit": "1"
+    },
+    {
+      "description": "Independent synthetic building, one trajectory per building",
+      "dtype": "int64",
+      "name": "building_id",
+      "nullable": false,
+      "role": "id",
+      "unit": "1"
+    },
+    {
+      "description": "Zero-based hour within the trajectory",
+      "dtype": "int32",
+      "name": "step",
+      "nullable": false,
+      "role": "id",
+      "unit": "h"
+    },
+    {
+      "description": "Latent temperature at decision time",
+      "dtype": "float",
+      "name": "true_temp_c",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "Thermal conductance to ambient",
+      "dtype": "float",
+      "name": "conductance_kw_per_c",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kW/degC"
+    },
+    {
+      "description": "Lumped thermal heat capacity",
+      "dtype": "float",
+      "name": "capacity_kwh_per_c",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kWh/degC"
+    },
+    {
+      "description": "Requested background electrical load",
+      "dtype": "float",
+      "name": "base_load_kw",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kW"
+    },
+    {
+      "description": "Occupant heat plus served background electric heat",
+      "dtype": "float",
+      "name": "internal_heat_kw",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kW"
+    },
+    {
+      "description": "Solar heat admitted to building",
+      "dtype": "float",
+      "name": "solar_heat_kw",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kW"
+    },
+    {
+      "description": "Shared unmodeled hourly heat disturbance",
+      "dtype": "float",
+      "name": "process_heat_kw",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kW"
+    },
+    {
+      "description": "Actual temperature-dependent coefficient of performance",
+      "dtype": "float",
+      "name": "cop",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "1"
+    },
+    {
+      "description": "Bias excluding white measurement noise",
+      "dtype": "float",
+      "name": "sensor_bias_c",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "Dropout or absolute serialized sensor_bias_c greater than 0.75 degC",
+      "dtype": "bool",
+      "name": "sensor_fault",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "1"
+    },
+    {
+      "description": "One-step potential outcome under action 0",
+      "dtype": "float",
+      "name": "cf_next_temp_c_0",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "One-step potential outcome under action 0",
+      "dtype": "float",
+      "name": "cf_energy_kwh_0",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kWh"
+    },
+    {
+      "description": "One-step potential outcome under action 0",
+      "dtype": "float",
+      "name": "cf_cost_0",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "currency"
+    },
+    {
+      "description": "One-step potential outcome under action 0",
+      "dtype": "float",
+      "name": "cf_carbon_kg_0",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kgCO2e"
+    },
+    {
+      "description": "One-step potential outcome under action 0",
+      "dtype": "float",
+      "name": "cf_discomfort_c_0",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "One-step potential outcome under action 0",
+      "dtype": "float",
+      "name": "cf_reward_0",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "currency-equivalent"
+    },
+    {
+      "description": "One-step potential outcome under action 1",
+      "dtype": "float",
+      "name": "cf_next_temp_c_1",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "One-step potential outcome under action 1",
+      "dtype": "float",
+      "name": "cf_energy_kwh_1",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kWh"
+    },
+    {
+      "description": "One-step potential outcome under action 1",
+      "dtype": "float",
+      "name": "cf_cost_1",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "currency"
+    },
+    {
+      "description": "One-step potential outcome under action 1",
+      "dtype": "float",
+      "name": "cf_carbon_kg_1",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kgCO2e"
+    },
+    {
+      "description": "One-step potential outcome under action 1",
+      "dtype": "float",
+      "name": "cf_discomfort_c_1",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "One-step potential outcome under action 1",
+      "dtype": "float",
+      "name": "cf_reward_1",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "currency-equivalent"
+    },
+    {
+      "description": "One-step potential outcome under action 2",
+      "dtype": "float",
+      "name": "cf_next_temp_c_2",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "One-step potential outcome under action 2",
+      "dtype": "float",
+      "name": "cf_energy_kwh_2",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kWh"
+    },
+    {
+      "description": "One-step potential outcome under action 2",
+      "dtype": "float",
+      "name": "cf_cost_2",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "currency"
+    },
+    {
+      "description": "One-step potential outcome under action 2",
+      "dtype": "float",
+      "name": "cf_carbon_kg_2",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "kgCO2e"
+    },
+    {
+      "description": "One-step potential outcome under action 2",
+      "dtype": "float",
+      "name": "cf_discomfort_c_2",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "degC"
+    },
+    {
+      "description": "One-step potential outcome under action 2",
+      "dtype": "float",
+      "name": "cf_reward_2",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "currency-equivalent"
+    },
+    {
+      "description": "Action maximizing serialized one-step reward; smallest index breaks ties",
+      "dtype": "int8",
+      "name": "oracle_action",
+      "nullable": false,
+      "role": "oracle",
+      "unit": "1"
+    }
+  ]
+}
