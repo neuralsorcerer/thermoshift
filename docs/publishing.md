@@ -1,6 +1,6 @@
 # Publishing and consumption
 
-[Project overview](../README.md) · [Generation](generation.md) · [Python API](api.md)
+[Project overview](index.md) · [Generation](generation.md) · [Python API](api.md)
 
 ## Prepare the release
 

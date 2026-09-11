@@ -1,6 +1,26 @@
-# ThermoShift
+<h1 align="center">
+ThermoShift
+</h1>
+<h3 align="center">
+Synthetic building-cooling trajectories with paired counterfactual outcomes for machine learning.
+</h3>
 
-**Synthetic building-cooling trajectories with paired counterfactual outcomes for machine learning.**
+---
+
+<div align="center">
+
+[![Current Release](https://img.shields.io/github/release/neuralsorcerer/thermoshift.svg)](https://github.com/neuralsorcerer/thermoshift/releases)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Test Linux](https://github.com/neuralsorcerer/thermoshift/actions/workflows/ubuntu.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/ubuntu.yml?query=branch%3Amain)
+[![Test Windows](https://github.com/neuralsorcerer/thermoshift/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/windows.yml?query=branch%3Amain)
+[![Test macOS](https://github.com/neuralsorcerer/thermoshift/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/macos.yml?query=branch%3Amain)
+[![Lint](https://github.com/neuralsorcerer/thermoshift/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/lint.yml?query=branch%3Amain)
+[![CodeQL](https://github.com/neuralsorcerer/thermoshift/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/codeql.yml?query=branch%3Amain)
+[![Documentation](https://github.com/neuralsorcerer/thermoshift/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/docs.yml?query=branch%3Amain)
+[![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
+
+</div>
+
 
 ThermoShift generates hourly cooling decisions for temperature prediction,
 action-effect estimation, one-step policy evaluation, and sensor-state modeling.
@@ -35,6 +55,9 @@ one hour from a logged state. Evaluating a replacement policy over an entire
 trajectory requires simulating the states that policy would produce.
 
 ## Installation
+
+Browse the [documentation guides](docs/index.md), or see
+[development and documentation](docs/development.md) to build the Sphinx site locally.
 
 Use Python 3.11 or later. Core dependencies are NumPy, PyArrow,
 filelock, portalocker, and PyYAML; version ranges are defined in

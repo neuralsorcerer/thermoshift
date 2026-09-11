@@ -1,6 +1,6 @@
 # Package architecture
 
-[Project overview](../README.md) · [Python API](api.md) · [Development](../CONTRIBUTING.md)
+[Project overview](index.md) · [Python API](api.md) · [Development](development.md)
 
 The CLI and Python entrypoints share the same generation, reading, validation, and
 publication functions.

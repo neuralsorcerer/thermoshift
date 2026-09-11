@@ -1,6 +1,6 @@
 # Column reference
 
-[Project overview](../README.md) · [Python API](api.md)
+[Project overview](index.md) · [Python API](api.md)
 
 Columns are defined in `src/thermoshift/schema.py`. Each configuration has one row per
 decision, joined by `row_id`. The `role` field identifies how a column is used.

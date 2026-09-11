@@ -1,0 +1,59 @@
+name: Windows Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install test and build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,hub,analysis,notebook]"
+          python -m pip check
+
+      - name: Run tests
+        run: python -m pytest -q --junitxml=reports/pytest.xml
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Verify installed distribution and replay
+        run: python scripts/check_distribution.py
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-windows-${{ matrix.python-version }}
+          path: reports/pytest.xml
+          if-no-files-found: ignore
+          retention-days: 14

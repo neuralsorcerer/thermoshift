@@ -24,6 +24,7 @@ MANIFEST
 *.whl
 *.tar.gz
 site/
+docs/_build/
 parts/
 sdist/
 .pytest_cache/

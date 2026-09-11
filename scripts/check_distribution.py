@@ -114,6 +114,7 @@ def main() -> None:
             "constraints.txt",
             "MANIFEST.in",
             "LICENSE",
+            "docs/requirements.txt",
         ):
             assert archive.extractfile(f"{prefix}/{name}").read() == (ROOT / name).read_bytes()
 

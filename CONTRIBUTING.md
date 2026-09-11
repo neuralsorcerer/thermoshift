@@ -15,8 +15,8 @@ command. The package version is defined once in `src/thermoshift/_version.py`.
 ## Check a change
 
 ```bash
-python -m ruff check src tests examples scripts benchmarks
-python -m ruff format --check src tests examples scripts benchmarks
+python -m ruff check src tests examples scripts benchmarks docs
+python -m ruff format --check src tests examples scripts benchmarks docs
 python scripts/update_schema.py --check
 python -m pytest
 ```
@@ -65,5 +65,36 @@ into a temporary target, then generates, validates, and replays a small dataset
 from that installation. Build outputs go to `dist/`.
 
 Keep runtime environments, caches, generated experiment directories, and test
-reports outside versioned source files. The CI workflow runs linting, formatting,
-schema checks, tests, and distribution checks on its configured Python versions.
+reports outside versioned source files.
+
+## Continuous integration
+
+The workflows in [.github/workflows](.github/workflows) separate the checks:
+
+| Workflow | Checks |
+| --- | --- |
+| `ubuntu.yml`, `macos.yml`, `windows.yml` | Python 3.11–3.14 tests, dependency consistency, wheel/source builds, installed-wheel generation and exact replay |
+| `lint.yml` | Ruff lint, import ordering, and formatting |
+| `docs.yml` | Strict Sphinx HTML build, generated schema reference, notebook execution with a fresh 50,003-decision release, and GitHub Pages deployment from main |
+| `codeql.yml` | Python and GitHub Actions security analysis on main pushes/PRs and a weekly schedule |
+
+Every workflow supports manual dispatch. Test workflows retain JUnit reports for
+14 days; documentation checks retain the executed notebook and validation report.
+The documentation job uses an isolated working directory so it neither relies on
+the bundled sample's original runtime nor overwrites tracked notebook outputs.
+The Markdown documentation builds with Sphinx, MyST, and Furo:
+
+```bash
+python -m pip install -r docs/requirements.txt
+python -m sphinx -W --keep-going -b html docs docs/_build/html
+```
+
+See [docs/development.md](docs/development.md) for local preview and GitHub Pages
+setup. Pull requests build the site without deploying. Pushes to `main` and manual
+runs on `main` deploy after all documentation checks pass; set the repository's
+Pages source to **GitHub Actions** before the first deployment.
+
+These workflows replace `test.yml`. If branch protection requires its old check
+names, update the required checks to the new platform test and lint jobs after
+their first GitHub run. Configure CodeQL as advanced setup when using `codeql.yml`
+instead of a separate default-setup scan.

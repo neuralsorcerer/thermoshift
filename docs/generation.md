@@ -1,6 +1,6 @@
 # Generation and operations
 
-[Project overview](../README.md) · [Python API](api.md) · [Publishing](publishing.md)
+[Project overview](index.md) · [Python API](api.md) · [Publishing](publishing.md)
 
 ## Configure a run
 
@@ -40,7 +40,7 @@ It is fixed at initialization. Smaller shards expose more independent jobs and
 produce more files. Workers are capped by the number of shards assigned to the
 current rank. A single assigned shard runs in the calling process.
 
-Use the [benchmark script](../benchmarks/README.md) to measure a representative run.
+Use the [benchmark script](https://github.com/neuralsorcerer/thermoshift/blob/main/benchmarks/README.md) to measure a representative run.
 For one billion decisions with default episode and shard sizes, the configuration
 contains 5,952,381 buildings and 364 storage shards, with at most 3,640 Parquet files.
 

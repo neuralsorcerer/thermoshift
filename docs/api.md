@@ -1,6 +1,6 @@
 # Python API
 
-[Project overview](../README.md) · [Generation](generation.md) · [Architecture](architecture.md)
+[Project overview](index.md) · [Generation](generation.md) · [Architecture](architecture.md)
 
 ## Create and validate
 
