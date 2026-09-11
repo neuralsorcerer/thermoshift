@@ -63,6 +63,12 @@ Use Python 3.11 or later. Core dependencies are NumPy, PyArrow,
 filelock, portalocker, and PyYAML; version ranges are defined in
 [pyproject.toml](pyproject.toml).
 
+From PyPI:
+
+```bash
+pip install thermoshift
+```
+
 From a source checkout:
 
 ```bash
