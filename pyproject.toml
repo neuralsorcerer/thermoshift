@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "thermoshift-synth"
+name = "thermoshift"
 dynamic = ["version"]
 authors = [{name = "Soumyadip Sarkar"}]
 description = "Synthetic Cooling Trajectories and Counterfactual Outcomes for Machine Learning"

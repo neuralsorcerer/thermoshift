@@ -13,6 +13,7 @@ import yaml
 
 from thermoshift import Config
 from thermoshift.filesystem import atomic_json, read_json, sha256
+from thermoshift.provenance import load_config
 from thermoshift.storage import finalize, generate, initialize
 from thermoshift.validation import validate
 
@@ -104,6 +105,28 @@ def test_runtime_mismatch_prevents_mixed_resume(tmp_path):
     atomic_json(tmp_path / "run_config.json", document)
     with pytest.raises(ValueError, match="runtime differs"):
         generate(tmp_path, progress=None)
+
+
+def test_package_rename_preserves_legacy_provenance_reading(tmp_path):
+    config = Config(rows=10)
+    initialize(tmp_path, config)
+    document = read_json(tmp_path / "run_config.json")
+    assert "thermoshift" in document["runtime"]
+    assert "thermoshift-synth" not in document["runtime"]
+    document["runtime"]["thermoshift-synth"] = document["runtime"].pop("thermoshift")
+    atomic_json(tmp_path / "run_config.json", document)
+    assert load_config(tmp_path) == config
+    with pytest.raises(ValueError, match="runtime differs"):
+        generate(tmp_path)
+
+
+def test_runtime_requires_package_version_after_rename(tmp_path):
+    initialize(tmp_path, Config(rows=10))
+    document = read_json(tmp_path / "run_config.json")
+    del document["runtime"]["thermoshift"]
+    atomic_json(tmp_path / "run_config.json", document)
+    with pytest.raises(ValueError, match="invalid runtime provenance"):
+        load_config(tmp_path)
 
 
 def test_hugging_face_local_loading_and_column_projection(tmp_path):

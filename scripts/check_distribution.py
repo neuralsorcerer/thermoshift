@@ -75,6 +75,7 @@ def main() -> None:
             name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
         )
         metadata = BytesParser().parsebytes(archive.read(metadata_path))
+        assert metadata["Name"] == "thermoshift"
         assert metadata["Version"] == __version__
         entrypoints = next(
             name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt")

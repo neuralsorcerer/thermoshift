@@ -45,7 +45,7 @@ def runtime() -> dict[str, str]:
     """Versions used to initialize and resume a generation run."""
     return {
         "python": platform.python_version(),
-        "thermoshift-synth": __version__,
+        "thermoshift": __version__,
         **{name: importlib.metadata.version(name) for name in ("numpy", "pyarrow")},
     }
 
@@ -82,10 +82,12 @@ def load_config(root: str | Path, check_runtime: bool = False) -> Config:
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("invalid source SHA-256 in run configuration")
     versions = document["runtime"]
-    required_versions = {"python", "numpy", "pyarrow", "thermoshift-synth"}
+    required_versions = {"python", "numpy", "pyarrow"}
     if (
         not isinstance(versions, dict)
         or not required_versions.issubset(versions)
+        # Preserve read access to immutable releases made before the package rename.
+        or not {"thermoshift", "thermoshift-synth"}.intersection(versions)
         or any(not isinstance(v, str) or not v for v in versions.values())
     ):
         raise ValueError("invalid runtime provenance in run configuration")
