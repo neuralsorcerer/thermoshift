@@ -11,6 +11,12 @@ generation, and optional Hugging Face publication.
 
 ## Get started
 
+From PyPI:
+
+```bash
+pip install thermoshift
+```
+
 Use Python 3.11 or later. From a source checkout:
 
 ```bash
