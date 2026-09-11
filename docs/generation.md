@@ -130,5 +130,13 @@ cleanup may leave `running`; rerun validation to refresh the report.
 | `_SUCCESS.json` | Completed-release metadata binding |
 | `_state/` | Committed shard state and local publication binding |
 
-CLI commands emit a JSON result to stdout and errors or progress to stderr.
-Exit status is 0 for success, 2 for input/operation errors, and 130 for interruption.
+CLI commands emit a JSON result to stdout on success and errors or progress to
+stderr. `--version` prints the installed version without a subcommand. Parser
+errors are handled by `argparse` and do not emit JSON. Handled `ValueError` and
+`OSError` failures return status 2; interruption returns 130.
+
+The successful result shapes are documented in the [Python API](api.md): `init`
+returns plan metadata, `plan` returns row/shard/batch counts, `generate` returns
+written/resumed counts and elapsed seconds, `finalize` returns compact manifest
+counts, and `validate` returns its validation report. `generate` automatically
+finalizes only single-rank runs; multi-rank runs require an explicit `finalize`.

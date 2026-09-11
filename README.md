@@ -284,18 +284,21 @@ building. It reports missing intervals when overlap or building counts are
 insufficient; row-weight effective sample size is an overlap diagnostic. Its
 `--report` option saves the JSON result.
 
+The complete Python and CLI contracts, including `Config`, in-memory simulation,
+validation reports, verified paired readers, schema helpers, publication plans,
+and notebook execution, are in the [Python API reference](docs/api.md).
+
 ### Bundled sample and notebook
 
 [sample_dataset/](sample_dataset/) contains 50,003 decisions from 298 buildings
 and can be loaded by substituting `sample_dataset` in the loading examples. It is
 included in the repository, but excluded from the wheel and source distribution.
 
-The sample records a different generator fingerprint and a Python 3.12.14 runtime.
-During verification with the current source on Python 3.13.9, its metadata and
-checksum checks passed, but full validation failed with
-`observable logging policy is not exactly reproducible`. Use a freshly generated,
-fully validated release for experiments requiring the current validation contract;
-the sample's saved report is not evidence of passing a new validation run.
+The sample records a different generator fingerprint and was generated with
+Python 3.12.14 and ThermoShift 0.1.0. Its checked-in `validation.json` records a
+passing full validation and deterministic replay for that recorded source and
+runtime. Replay validation is intentionally provenance-sensitive; generate a
+fresh release when validating the current source or runtime.
 
 The walkthrough explores the bundled sample's tables, splits, feature roles, and
 paired outcomes:

@@ -42,7 +42,8 @@ print(next(iter(records)))
 - [Generation and operations](generation.md): configuration, scaling, ranks,
   recovery, and validation.
 - [Python API](api.md): generation, verified paired readers, simulation, and
-  reference experiments.
+  reference experiments, schema helpers, publication, notebook execution, and
+  the command-line result contracts.
 - [Column reference](schema.md): field types, units, nullability, and feature roles.
 - [Model and data reference](model.md): thermal equations, parameter distributions,
   sensors, propensities, and stress conditions.

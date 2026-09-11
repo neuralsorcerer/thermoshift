@@ -4,7 +4,8 @@
 
 ## Prepare the release
 
-Install the Hub extra and authenticate in the environment used to run the command:
+Install the `hub` extra and authenticate in the environment used to run the
+command or Python API:
 
 ```bash
 python -m pip install -e ".[hub]"
@@ -36,8 +37,12 @@ The default visibility is private. Existing repository visibility must match the
 selected mode. A new repository starts on `main`; use an existing branch with
 `--revision` when publishing to another revision.
 
-The command returns `repo_id`, `revision`, `commit_sha`, and the completed revision
-URL. Record the commit SHA alongside experiment results.
+An upload returns the plan fields plus `repo_id`, `revision`, `commit_sha`, and
+the completed revision URL. A dry run returns only the local plan, including
+record counts, compressed bytes, visibility, file patterns, and steps; it has no
+`commit_sha` or URL and does not upload. Record the commit SHA from a completed
+upload alongside experiment results. The Python signature and return contracts
+are in the [Python API](api.md).
 
 The generated dataset card defines two configurations, `logged` and `oracle`, and
 the nonempty splits in each. The payload consists of ordinary Parquet files,

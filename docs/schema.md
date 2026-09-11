@@ -76,3 +76,13 @@ decision, joined by `row_id`. The `role` field identifies how a column is used.
 | `cf_discomfort_c_2` | float32 | degC | oracle | no | One-step potential outcome under action 2 |
 | `cf_reward_2` | float32 | currency-equivalent | oracle | no | One-step potential outcome under action 2 |
 | `oracle_action` | int8 | 1 | oracle | no | Action maximizing serialized one-step reward; smallest index breaks ties |
+
+## Schema helper APIs
+
+The supported helpers in `thermoshift.schema` are:
+
+- `schema_document()` returns a JSON-serializable description of both schemas, including names, Arrow types, nullability, roles, units, and descriptions.
+- `feature_roles()` returns `policy_features`, `transition_features`, `forbidden_policy_inputs`, and the `oracle_access` usage string.
+- `LOGGED_SCHEMA` and `ORACLE_SCHEMA` are the PyArrow schemas; `SCHEMAS` maps `logged` and `oracle` to them, and `FEATURES` is the policy feature list.
+
+The generated `schema.json` and `feature_roles.json` files are serialized copies of the two helper results. See [Python API](api.md) for usage examples.

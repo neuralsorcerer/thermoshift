@@ -44,6 +44,24 @@ def render() -> str:
                 f"{nullable} | {description} |"
             )
         lines.append("")
+    lines.extend(
+        [
+            "## Schema helper APIs",
+            "",
+            "The supported helpers in `thermoshift.schema` are:",
+            "",
+            "- `schema_document()` returns a JSON-serializable description of both "
+            "schemas, including names, Arrow types, nullability, roles, units, and descriptions.",
+            "- `feature_roles()` returns `policy_features`, `transition_features`, "
+            "`forbidden_policy_inputs`, and the `oracle_access` usage string.",
+            "- `LOGGED_SCHEMA` and `ORACLE_SCHEMA` are the PyArrow schemas; `SCHEMAS` "
+            "maps `logged` and `oracle` to them, and `FEATURES` is the policy feature list.",
+            "",
+            "The generated `schema.json` and `feature_roles.json` files are serialized "
+            "copies of the two helper results. See [Python API](api.md) for usage examples.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
