@@ -109,10 +109,12 @@ Put process-spawning code behind a main guard:
 ```python
 from thermoshift import Config, generate, initialize
 
+
 def main():
     root = "output/parallel"
     initialize(root, Config(rows=2_000_000, shard_buildings=4096))
     generate(root, workers=4, batch_buildings=256)
+
 
 if __name__ == "__main__":
     main()
