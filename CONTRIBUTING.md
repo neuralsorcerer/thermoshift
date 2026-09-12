@@ -75,13 +75,14 @@ The workflows in [.github/workflows](.github/workflows) separate the checks:
 | --- | --- |
 | `ubuntu.yml`, `macos.yml`, `windows.yml` | Python 3.11–3.14 tests, dependency consistency, wheel/source builds, installed-wheel generation and exact replay |
 | `lint.yml` | Ruff lint, import ordering, and formatting |
-| `docs.yml` | Strict Sphinx HTML build, generated schema reference, notebook execution with a fresh 50,003-decision release, and GitHub Pages deployment from main |
+| `docs.yml` | Strict Sphinx HTML build, generated schema reference, notebook execution with the bundled sample and a fresh 50,003-decision release, and GitHub Pages deployment from main |
 | `codeql.yml` | Python and GitHub Actions security analysis on main pushes/PRs and a weekly schedule |
 
 Every workflow supports manual dispatch. Test workflows retain JUnit reports for
 14 days; documentation checks retain the executed notebook and validation report.
-The documentation job uses an isolated working directory so it neither relies on
-the bundled sample's original runtime nor overwrites tracked notebook outputs.
+The documentation job checks the bundled sample's integrity and historical
+profiles, then runs full validation in an isolated working directory with a fresh
+release. Both walkthroughs execute notebook copies without overwriting tracked outputs.
 The Markdown documentation builds with Sphinx, MyST, and Furo:
 
 ```bash

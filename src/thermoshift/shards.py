@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
 
 from thermoshift.config import SPLITS, Config, boolean
-from thermoshift.filesystem import read_json, sha256
+from thermoshift.filesystem import dataset_path, read_json, sha256
 from thermoshift.random import split_codes
 from thermoshift.schema import SCHEMAS
 
@@ -48,30 +49,35 @@ def shard_complete(
 ) -> bool:
     """Check committed shard metadata, file sizes and optional checksums."""
     boolean(verify_hash, "verify_hash")
-    path = state_path(root, shard_id)
-    if not path.exists():
-        return False
     try:
+        path = dataset_path(root, state_path(".", shard_id))
+        if not path.exists():
+            return False
         doc = read_json(path)
         if (
             doc["fingerprint"] != config.fingerprint
+            or type(doc["shard_id"]) is not int
             or doc["shard_id"] != shard_id
-            or doc["provenance_sha256"] != sha256(Path(root) / "run_config.json")
+            or doc["provenance_sha256"] != sha256(dataset_path(root, "run_config.json"))
         ):
             return False
         expected = expected_shard(config, shard_id)
-        if len(doc["files"]) != len(expected):
+        if not isinstance(doc["files"], list) or len(doc["files"]) != len(expected):
             return False
         if {f["path"]: f["rows"] for f in doc["files"]} != expected:
             return False
         for f in doc["files"]:
-            full = Path(root) / f["path"]
+            full = dataset_path(root, f["path"])
             if (
                 f["kind"] != f["path"].split("/")[1]
                 or f["split"] != f["path"].split("/")[2]
+                or type(f["shard_id"]) is not int
                 or f["shard_id"] != shard_id
+                or type(f["rows"]) is not int
                 or type(f["bytes"]) is not int
                 or f["bytes"] <= 0
+                or not isinstance(f["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", f["sha256"]) is None
             ):
                 return False
             if not full.is_file() or full.is_symlink() or full.stat().st_size != f["bytes"]:
@@ -87,6 +93,5 @@ def remove_temporaries(root: str | Path, shard_id: int) -> None:
     """Remove known temporary files after verifying the committed shard."""
     for kind in SCHEMAS:
         for split in SPLITS:
-            (Path(root) / shard_path(kind, split, shard_id)).with_suffix(
-                ".parquet.inprogress"
-            ).unlink(missing_ok=True)
+            relative = Path(shard_path(kind, split, shard_id)).with_suffix(".parquet.inprogress")
+            dataset_path(root, relative).unlink(missing_ok=True)

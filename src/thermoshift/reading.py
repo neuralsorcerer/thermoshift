@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from itertools import zip_longest
 from pathlib import Path
@@ -18,11 +19,11 @@ import pyarrow.parquet as pq
 
 from thermoshift._checks import require
 from thermoshift.config import SPLITS, Config, boolean, integer
-from thermoshift.filesystem import read_json, sha256
+from thermoshift.filesystem import dataset_path, read_json, sha256
 from thermoshift.lifecycle import dataset_lock
 from thermoshift.provenance import check_schema_documents, load_config, metadata_hashes
 from thermoshift.schema import SCHEMAS
-from thermoshift.shards import expected_shard
+from thermoshift.shards import expected_shard, shard_path
 
 
 def validated_manifest(root: str | Path, verify_hash: bool = True) -> tuple[Config, dict[str, Any]]:
@@ -36,23 +37,53 @@ def _validated_manifest(root, verify_hash=True):
     root = Path(root)
     config = load_config(root)
     check_schema_documents(root)
-    manifest = read_json(root / "manifest.json")
-    success = read_json(root / "_SUCCESS.json")
+    manifest = read_json(dataset_path(root, "manifest.json"))
+    success = read_json(dataset_path(root, "_SUCCESS.json"))
+    require(isinstance(manifest, dict), "manifest must be a JSON object")
+    require(isinstance(success, dict), "completion marker must be a JSON object")
     require(
         success.get("metadata_sha256") == metadata_hashes(root),
         "release metadata checksum mismatch",
     )
     require(
-        success["manifest_sha256"] == sha256(root / "manifest.json"), "manifest is not finalized"
+        success.get("manifest_sha256") == sha256(root / "manifest.json"),
+        "manifest is not finalized",
     )
     require(
-        manifest.get("complete") is True and manifest["fingerprint"] == config.fingerprint,
+        manifest.get("complete") is True and manifest.get("fingerprint") == config.fingerprint,
         "manifest/config mismatch",
     )
+    files = manifest.get("files")
+    require(isinstance(files, list), "manifest files must be a list")
+    for item in files:
+        require(isinstance(item, dict), "manifest file entries must be JSON objects")
+        require(isinstance(item.get("path"), str), "manifest file path must be a string")
+        require(isinstance(item.get("kind"), str) and item["kind"] in SCHEMAS, "file kind mismatch")
+        require(item.get("split") in SPLITS, "file split mismatch")
+        for name in ("rows", "bytes", "shard_id"):
+            integer(item.get(name), f"file {name}", 0 if name == "shard_id" else 1)
+        require(item["shard_id"] < config.shards, "shard range mismatch")
+        require(
+            isinstance(item.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is not None,
+            "invalid file SHA-256",
+        )
+        require(
+            item["path"] == shard_path(item["kind"], item["split"], item["shard_id"]),
+            "file path/shard mismatch",
+        )
+    for name in ("rows", "buildings", "bytes"):
+        integer(manifest.get(name), f"manifest {name}", 1)
+    split_rows = manifest.get("split_rows")
+    require(
+        isinstance(split_rows, dict) and set(split_rows) == set(SPLITS),
+        "manifest split rows must cover the configured splits",
+    )
+    for count in split_rows.values():
+        integer(count, "split row count", 0)
     expected = {}
     for sid in range(config.shards):
         expected.update(expected_shard(config, sid))
-    files = manifest["files"]
     require(
         files == sorted(files, key=lambda f: f["path"]),
         "manifest files must have canonical path order",
@@ -77,8 +108,7 @@ def _validated_manifest(root, verify_hash=True):
     for item in files:
         require(item["kind"] == item["path"].split("/")[1], "file kind mismatch")
         require(item["split"] == item["path"].split("/")[2], "file split mismatch")
-        require(item["path"] in expected_shard(config, item["shard_id"]), "shard range mismatch")
-        path = root / item["path"]
+        path = dataset_path(root, item["path"])
         require(path.stat().st_size == item["bytes"], f"file size mismatch: {item['path']}")
         if verify_hash:
             require(sha256(path) == item["sha256"], f"checksum mismatch: {item['path']}")
@@ -136,4 +166,6 @@ def _iter_pairs(root, manifest, split=None, batch_size=65_536):
             for x, o in zip_longest(left, right):
                 require(x is not None and o is not None, "paired file lengths differ")
                 require(x.num_rows == o.num_rows, "paired batch lengths differ")
+                for name in ("row_id", "building_id", "step"):
+                    require(x[name].equals(o[name]), "logged/oracle join mismatch")
                 yield item, pa.Table.from_batches([x]), pa.Table.from_batches([o])

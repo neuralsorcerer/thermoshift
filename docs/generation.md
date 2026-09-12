@@ -54,6 +54,9 @@ changing row-group boundaries can change the compressed file bytes.
 A shard becomes committed after its Parquet files are closed, flushed, renamed,
 and described by an atomic state file. Finalization checks every shard and writes
 the release manifest, dataset card, and completion marker.
+Refinalizing clears the previous completion marker and validation report before
+checking shards. If finalization fails, finish recovery and validate again before
+consuming the release.
 
 | Situation | Action |
 | --- | --- |

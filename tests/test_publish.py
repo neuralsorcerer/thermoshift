@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from huggingface_hub import CommitOperationDelete, RepoFile
 from huggingface_hub import HfApi as RealApi
-from huggingface_hub import RepoFile
 
 from thermoshift import Config
 from thermoshift.filesystem import atomic_json, read_json
@@ -58,10 +58,12 @@ class MemoryHub:
         self.check("list_repo_files", kw)
         return list(self.trees[kw["revision"]])
 
-    def commit(self, parent, additions):
+    def commit(self, parent, additions, deletions=()):
         if parent != self.head:
             raise ValueError("mock parent commit conflict")
         tree = {**self.trees[self.head], **additions}
+        for name in deletions:
+            del tree[name]
         self.head = f"commit{len(self.trees):040d}"
         self.trees[self.head] = tree
         return SimpleNamespace(oid=self.head)
@@ -70,7 +72,12 @@ class MemoryHub:
         self.check("create_commit", kw)
         return self.commit(
             kw["parent_commit"],
-            {op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in kw["operations"]},
+            {
+                op.path_in_repo: Path(op.path_or_fileobj).read_bytes()
+                for op in kw["operations"]
+                if not isinstance(op, CommitOperationDelete)
+            },
+            [op.path_in_repo for op in kw["operations"] if isinstance(op, CommitOperationDelete)],
         )
 
     def upload_folder(self, **kw):
@@ -184,6 +191,50 @@ def test_partial_upload_resumes_with_same_intent(release, hub):
     hub.fail_payload = False
     publish(release, "unit-test/release", public=True)
     assert "_SUCCESS.json" in hub.trees[hub.head]
+
+
+@pytest.mark.parametrize("failure", ["fail_payload", "corrupt", "race_before_marker"])
+def test_republication_invalidates_previous_marker_before_payload_changes(release, hub, failure):
+    previous = publish(release, "unit-test/release", public=True)["commit_sha"]
+    setattr(hub, failure, "schema.json" if failure == "corrupt" else True)
+    with pytest.raises((OSError, ValueError)):
+        publish(release, "unit-test/release", public=True)
+    assert "_SUCCESS.json" not in hub.trees[hub.head]
+    assert "_SUCCESS.json" in hub.trees[previous]
+    setattr(hub, failure, None if failure == "corrupt" else False)
+    result = publish(release, "unit-test/release", public=True)
+    assert "_SUCCESS.json" in hub.trees[result["commit_sha"]]
+
+
+def test_upload_plan_patterns_are_independent_of_publisher_state(release):
+    plan = publish(release, "unit-test/release", dry_run=True)
+    patterns = list(plan["allow_patterns"])
+    plan["allow_patterns"].clear()
+    assert publish(release, "unit-test/release", dry_run=True)["allow_patterns"] == patterns
+
+
+@pytest.mark.parametrize("relative", ["_state", "_state/hub_binding.json", "_PUBLICATION.json"])
+def test_publication_rejects_symlinked_intent_paths_before_network(release, monkeypatch, relative):
+    import huggingface_hub
+
+    external = release.parent / "external"
+    linked = release / relative
+    if relative == "_state":
+        linked.rename(external)
+    else:
+        external.write_bytes(b"preserve this file")
+    linked.symlink_to(external, target_is_directory=relative == "_state")
+
+    def forbidden():
+        raise AssertionError("network client must not be created for unsafe local paths")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", forbidden)
+    with pytest.raises(ValueError, match="symlink"):
+        publish(release, "unit-test/release")
+    if relative == "_state":
+        assert not (external / "hub_binding.json").exists()
+    else:
+        assert external.read_bytes() == b"preserve this file"
 
 
 def test_concurrent_branch_change_cannot_receive_success_marker(release, hub):

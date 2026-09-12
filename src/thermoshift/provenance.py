@@ -17,7 +17,7 @@ from pathlib import Path
 
 from thermoshift._version import __version__
 from thermoshift.config import Config, boolean
-from thermoshift.filesystem import atomic_json, read_json, sha256
+from thermoshift.filesystem import atomic_json, dataset_path, read_json, sha256
 from thermoshift.schema import feature_roles, schema_document
 
 BASE_METADATA = (
@@ -52,16 +52,17 @@ def runtime() -> dict[str, str]:
 
 def metadata_hashes(root: str | Path) -> dict[str, str]:
     """Hash the release metadata bound by the completion marker."""
-    return {name: sha256(Path(root) / name) for name in BASE_METADATA}
+    return {name: sha256(dataset_path(root, name)) for name in BASE_METADATA}
 
 
 def check_schema_documents(root: str | Path, repair_missing: bool = False) -> None:
     """Verify schema and feature documents, optionally creating missing copies."""
+    boolean(repair_missing, "repair_missing")
     for name, expected in (
         ("schema.json", schema_document()),
         ("feature_roles.json", feature_roles()),
     ):
-        path = Path(root) / name
+        path = dataset_path(root, name)
         if repair_missing and not path.exists():
             atomic_json(path, expected)
         if read_json(path) != expected:
@@ -71,7 +72,7 @@ def check_schema_documents(root: str | Path, repair_missing: bool = False) -> No
 def load_config(root: str | Path, check_runtime: bool = False) -> Config:
     """Load a configuration and verify its fingerprint and provenance structure."""
     boolean(check_runtime, "check_runtime")
-    document = read_json(Path(root) / "run_config.json")
+    document = read_json(dataset_path(root, "run_config.json"))
     required = {"config", "fingerprint", "source_sha256", "runtime"}
     if not isinstance(document, dict) or not required.issubset(document):
         raise ValueError("run configuration is missing required provenance fields")

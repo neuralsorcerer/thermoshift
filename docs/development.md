@@ -37,9 +37,12 @@ python scripts/update_schema.py --check
 ```
 
 The [quickstart notebook](https://github.com/neuralsorcerer/thermoshift/blob/main/notebooks/quickstart.ipynb)
-is checked separately by the documentation workflow. It generates a fresh release
-with the active runtime and executes a copy of the notebook against that release.
-The executed notebook and validation report are retained as workflow artifacts.
+is checked separately by the documentation workflow. It executes a copy against
+the bundled sample, then generates a fresh release with the active runtime and
+executes another copy against that release. The sample path verifies file integrity
+and labels saved scientific profiles as historical; the fresh path runs full
+validation. Both executed notebooks and the fresh validation report are retained
+as workflow artifacts.
 
 ## GitHub Pages
 

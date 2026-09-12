@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from thermoshift.config import boolean
-from thermoshift.filesystem import atomic_json, read_json, sha256
+from thermoshift.filesystem import atomic_json, dataset_path, read_json, sha256
 from thermoshift.lifecycle import dataset_lock
 
 UPLOAD_PATTERNS = [
@@ -114,7 +114,7 @@ def publish(
             "decision_rows": config.rows,
             "parquet_files": len(manifest["files"]),
             "parquet_bytes": manifest["bytes"],
-            "allow_patterns": UPLOAD_PATTERNS,
+            "allow_patterns": list(UPLOAD_PATTERNS),
             "upload_method": "HfApi.upload_folder",
             "dry_run": dry_run,
             "steps": [
@@ -127,10 +127,16 @@ def publish(
         }
         if dry_run:
             return plan
-        from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
+        from huggingface_hub import (
+            CommitOperationAdd,
+            CommitOperationDelete,
+            HfApi,
+            hf_hub_download,
+        )
         from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
 
-        binding_path = root / "_state" / "hub_binding.json"
+        binding_path = dataset_path(root, "_state/hub_binding.json")
+        publication_path = dataset_path(root, "_PUBLICATION.json")
         binding = {"repo_id": repo_id, "revision": revision, "public": public, **intent}
         if binding_path.exists() and read_json(binding_path) != binding:
             raise ValueError("this output is already bound to a different Hub target or release")
@@ -175,17 +181,22 @@ def publish(
             raise ValueError(
                 "remote contains additional data files; use a fresh release repository"
             )
-        atomic_json(root / "_PUBLICATION.json", intent)
+        atomic_json(publication_path, intent)
         atomic_json(binding_path, binding)
+        operations = [
+            CommitOperationAdd(path_in_repo=name, path_or_fileobj=root / name)
+            for name in ("run_config.json", "_PUBLICATION.json")
+        ]
+        # A retry can overwrite a previously completed tree. Invalidate its
+        # marker in the guarded commit before uploading any replacement bytes.
+        if "_SUCCESS.json" in remote_files:
+            operations.append(CommitOperationDelete(path_in_repo="_SUCCESS.json"))
         provenance = api.create_commit(
             repo_id=repo_id,
             repo_type="dataset",
             revision=revision,
             parent_commit=head,
-            operations=[
-                CommitOperationAdd(path_in_repo=name, path_or_fileobj=root / name)
-                for name in ("run_config.json", "_PUBLICATION.json")
-            ],
+            operations=operations,
             commit_message="Record ThermoShift provenance and immutable publication intent",
         )
         payload = api.upload_folder(

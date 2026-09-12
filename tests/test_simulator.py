@@ -20,6 +20,38 @@ def test_thermal_solution_matches_hand_calculation():
     assert thermal_step(25.0, 25.0, 2.0, 4.0, 3.0, 3.0) == pytest.approx(25.0)
 
 
+@pytest.mark.parametrize("conductance", [0.0, 1e-310, np.nextafter(0.0, 1.0)])
+def test_thermal_solution_at_insulated_limit(conductance):
+    # With no ambient transfer, 3 kW heats 4 kWh/degC by 0.75 degC in one hour.
+    with np.errstate(divide="raise", invalid="raise", over="raise"):
+        result = thermal_step(20.0, 30.0, conductance, 4.0, 3.0, 0.0)
+    assert result == pytest.approx(20.75, abs=1e-12)
+
+
+def test_thermal_solution_promotes_and_broadcasts_array_inputs():
+    conductance = np.array([[0], [2]], dtype=np.uint64)
+    result = thermal_step([20, 25], 30, conductance, 4, [3, 0], 0)
+    expected = np.array([[20.75, 25.0], [31.5 + (20 - 31.5) * np.exp(-0.5), 30 - 5 * np.exp(-0.5)]])
+    assert result.dtype == np.float64
+    np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "conductance,capacity",
+    [(-1, 4), (1, 0), (1, -4), (np.nan, 4), (np.inf, 4), (1, np.nan), (1, np.inf)],
+)
+def test_thermal_solution_rejects_invalid_physical_parameters(conductance, capacity):
+    with pytest.raises(ValueError, match="conductance.*capacity"):
+        thermal_step(20, 30, conductance, capacity, 3, 0)
+
+
+def test_thermal_solution_handles_overflowing_rate():
+    # With C/G far below one hour, temperature reaches the forced equilibrium.
+    with np.errstate(divide="raise", invalid="raise", over="raise"):
+        result = thermal_step(20, 30, 1e200, 1e-200, 3e200, 0)
+    assert result == pytest.approx(33.0)
+
+
 def test_batch_size_does_not_change_numeric_records():
     config = Config(rows=168 * 41 - 7)
     large_x, large_o, large_s = simulate(config, 0, config.buildings)
@@ -77,3 +109,10 @@ def test_split_assignment_is_disjoint_and_stable():
 def test_invalid_configuration_rejected(kwargs):
     with pytest.raises(ValueError):
         Config(**kwargs)
+
+
+@pytest.mark.parametrize("field,value", [("compression", "zstd"), ("schema_version", "2.0")])
+def test_configuration_rejects_array_string_values(field, value):
+    # Single-element arrays compare equal to strings but cannot be fingerprinted.
+    with pytest.raises(ValueError):
+        Config(**{field: np.array([value])})

@@ -26,7 +26,7 @@ from filelock import FileLock
 
 from thermoshift.cards import write_card
 from thermoshift.config import SPLITS, Config, integer
-from thermoshift.filesystem import atomic_json, fsync_directory, read_json, sha256
+from thermoshift.filesystem import atomic_json, dataset_path, fsync_directory, read_json, sha256
 from thermoshift.lifecycle import dataset_lock
 from thermoshift.provenance import (
     check_schema_documents,
@@ -53,7 +53,7 @@ def initialize(root: str | Path, config: Config) -> Config:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     with dataset_lock(root):
-        path = root / "run_config.json"
+        path = dataset_path(root, "run_config.json")
         if path.exists():
             current = load_config(root, check_runtime=True)
             if current != config:
@@ -95,10 +95,10 @@ def _worker_initialize():
 def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
     config = Config(**config_dict)
     root = Path(root)
-    state = root / "_state"
+    state = dataset_path(root, "_state")
     state.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    with FileLock(str(state / f"shard-{shard_id:08d}.lock"), timeout=0):
+    with FileLock(str(dataset_path(root, f"_state/shard-{shard_id:08d}.lock")), timeout=0):
         if shard_complete(root, config, shard_id):
             remove_temporaries(root, shard_id)
             return {
@@ -122,9 +122,11 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
                         for kind, table in (("logged", logged), ("oracle", oracle)):
                             relative = shard_path(kind, split, shard_id)
                             if relative not in writers:
-                                final = root / relative
+                                final = dataset_path(root, relative)
                                 final.parent.mkdir(parents=True, exist_ok=True)
-                                temporary = final.with_suffix(".parquet.inprogress")
+                                temporary = dataset_path(
+                                    root, Path(relative).with_suffix(".parquet.inprogress")
+                                )
                                 temp_paths[relative] = temporary
                                 handle = resources.enter_context(temporary.open("wb"))
                                 writer = pq.ParquetWriter(
@@ -163,7 +165,7 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
                     }
                 )
             atomic_json(
-                state_path(root, shard_id),
+                dataset_path(root, state_path(".", shard_id)),
                 {
                     "fingerprint": config.fingerprint,
                     "shard_id": shard_id,
@@ -263,6 +265,14 @@ def finalize(root: str | Path) -> dict[str, Any]:
     with dataset_lock(root):
         config = load_config(root, check_runtime=True)
         check_schema_documents(root)
+        # A failed or interrupted attempt must not leave a previous completion
+        # marker or scientific report certifying the changed release.
+        (root / "_SUCCESS.json").unlink(missing_ok=True)
+        (root / "validation.json").unlink(missing_ok=True)
+        data = dataset_path(root, "data")
+        if any(path.is_symlink() for path in data.rglob("*")):
+            raise ValueError("symlinks are not allowed under data/")
+        dataset_path(root, "_state")
         files = []
         for sid in range(config.shards):
             if not shard_complete(root, config, sid, verify_hash=True):
@@ -270,7 +280,7 @@ def finalize(root: str | Path) -> dict[str, Any]:
             remove_temporaries(root, sid)
             files.extend(read_json(state_path(root, sid))["files"])
         expected = {f["path"] for f in files}
-        actual = {p.relative_to(root).as_posix() for p in (root / "data").rglob("*.parquet")}
+        actual = {p.relative_to(root).as_posix() for p in data.rglob("*.parquet")}
         if actual != expected:
             raise ValueError("unexpected or missing Parquet files under data/")
         split_rows = {

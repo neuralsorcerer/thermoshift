@@ -60,6 +60,9 @@ The publisher records provenance, uploads the payload, and verifies remote file
 sizes and Git/LFS checksums at the returned immutable commit. It writes the
 completion marker after verification. Parent-commit guards detect intervening
 branch changes. Keep other writers away from the branch during publication.
+Republishing clears any previous completion marker in the guarded provenance
+commit before uploading payload files. A failed retry therefore leaves the branch
+unmarked; previously completed immutable commit URLs remain available.
 
 | Error | Resolution |
 | --- | --- |

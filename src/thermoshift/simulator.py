@@ -15,9 +15,33 @@ from thermoshift.schema import SCHEMAS
 
 
 def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
-    """Exact constant-forcing RC solution for dt=1 h, temperatures in degC."""
-    alpha = -np.expm1(-conductance / capacity)
-    return temp + alpha * (outdoor - temp + (heat_kw - cooling_kw) / conductance)
+    """Exact constant-forcing RC solution for dt=1 h, temperatures in degC.
+
+    Inputs broadcast as float64 arrays. Conductance must be finite and
+    nonnegative, and capacity finite and positive. Zero conductance is the
+    insulated-building limit.
+    """
+    temp, outdoor, conductance, capacity, heat_kw, cooling_kw = (
+        np.asarray(value, dtype=np.float64)
+        for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
+    )
+    if np.any(~np.isfinite(conductance) | (conductance < 0)) or np.any(
+        ~np.isfinite(capacity) | (capacity <= 0)
+    ):
+        raise ValueError(
+            "conductance must be finite and nonnegative and capacity must be finite and positive"
+        )
+    # Finite physical inputs can produce an infinite rate; the exponential
+    # then correctly saturates at one without overflowing the resulting state.
+    with np.errstate(over="ignore", under="ignore"):
+        rate = conductance / capacity
+    alpha = -np.expm1(-rate)
+    # Integrate heat separately so heat/conductance cannot overflow before
+    # multiplication by alpha. The series also covers zero and subnormal rates.
+    small = rate < 1e-8
+    heat_response = np.divide(alpha, conductance, out=np.zeros_like(rate), where=~small)
+    np.divide(1.0 - 0.5 * rate, capacity, out=heat_response, where=small)
+    return temp + alpha * (outdoor - temp) + (heat_kw - cooling_kw) * heat_response
 
 
 def _buffer(schema, n, steps):

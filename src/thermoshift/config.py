@@ -74,9 +74,13 @@ class Config:
             raise ValueError("reward weights must be finite and in [0, 1000000)")
         if type(self.hidden_confounding) is not bool:
             raise ValueError("hidden_confounding must be boolean")
-        if self.compression != "zstd" or not 1 <= self.compression_level <= 19:
+        if (
+            type(self.compression) is not str
+            or self.compression != "zstd"
+            or not 1 <= self.compression_level <= 19
+        ):
             raise ValueError("this version supports zstd compression levels 1 through 19")
-        if self.schema_version != "2.0":
+        if type(self.schema_version) is not str or self.schema_version != "2.0":
             raise ValueError("unsupported schema version")
 
     @property

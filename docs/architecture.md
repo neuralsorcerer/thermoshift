@@ -88,5 +88,6 @@ release binding. Parent-commit checks protect publication steps from branch chan
 
 The package version is defined in `_version.py` and read by the build backend.
 Source distributions include package code, tests, examples, guides, and notebooks.
-The sample is included in this project archive. Runtime environments, caches,
-experiment reports, and build outputs are excluded from the source archive.
+The sample is included in the repository but excluded from built distributions.
+Runtime environments, caches, experiment reports, and build outputs are also
+excluded from the source archive.

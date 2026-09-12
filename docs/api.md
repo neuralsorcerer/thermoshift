@@ -196,6 +196,9 @@ vectorized one-hour exact constant-forcing RC step used by the simulator. It
 returns the next temperature as a NumPy-compatible scalar or array. Temperatures
 are in degrees Celsius, conductance in kW/degree Celsius, capacity in
 kWh/degree Celsius, and heat/cooling in kW.
+Inputs broadcast in float64. Conductance must be nonnegative and capacity
+positive, and both must be finite; invalid physical parameters raise `ValueError`. At zero conductance,
+the insulated-building limit is `temp + (heat_kw - cooling_kw) / capacity`.
 
 ```python
 from thermoshift import Config, simulate
@@ -297,6 +300,8 @@ and final-expression display output, saves the notebook atomically after each
 cell, and returns the number of code cells executed. It changes into
 `working_directory` during execution and restores the original directory. Syntax,
 execution, and interruption exceptions are saved in the notebook and re-raised.
+Python `__future__` imports carry across cells, and captured stdout/stderr retains
+the order in which the cell emitted it.
 
 ```python
 from thermoshift.notebook import execute

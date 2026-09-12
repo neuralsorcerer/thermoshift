@@ -17,6 +17,25 @@ from pathlib import Path
 from typing import Any
 
 
+def dataset_path(root: str | Path, relative: str | Path) -> Path:
+    """Resolve an internal dataset path without following symlink components.
+
+    The dataset root itself may be a caller-selected symlink. Paths within it
+    must stay local so generation cannot write through a redirected partition,
+    temporary file or lock file. Lifecycle locks exclude cooperating writers;
+    unrelated programs must still leave active dataset paths unchanged.
+    """
+    relative = Path(relative)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("dataset paths must be relative to the dataset directory")
+    path = Path(root)
+    for part in relative.parts:
+        path /= part
+        if path.is_symlink():
+            raise ValueError(f"symlinks are not allowed in dataset paths: {relative}")
+    return path
+
+
 def sha256(path: str | Path) -> str:
     """Return the SHA-256 digest of a file without loading it into memory."""
     h = hashlib.sha256()

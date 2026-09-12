@@ -9,6 +9,7 @@ on:
       - "CONTRIBUTING.md"
       - "benchmarks/README.md"
       - "notebooks/**"
+      - "sample_dataset/**"
       - "src/**"
       - "scripts/**"
       - "pyproject.toml"
@@ -20,6 +21,7 @@ on:
       - "CONTRIBUTING.md"
       - "benchmarks/README.md"
       - "notebooks/**"
+      - "sample_dataset/**"
       - "src/**"
       - "scripts/**"
       - "pyproject.toml"
@@ -74,6 +76,10 @@ jobs:
 
           Path("reports").mkdir(exist_ok=True)
           copyfile("notebooks/quickstart.ipynb", "reports/quickstart.ipynb")
+          copyfile("notebooks/quickstart.ipynb", "reports/quickstart-sample.ipynb")
+
+      - name: Execute bundled sample walkthrough
+        run: python scripts/run_notebook.py reports/quickstart-sample.ipynb
 
       - name: Generate walkthrough data
         run: |
@@ -116,6 +122,7 @@ jobs:
           name: documentation-walkthrough
           path: |
             reports/quickstart.ipynb
+            reports/quickstart-sample.ipynb
             output/docs-smoke/sample_dataset/validation.json
           if-no-files-found: ignore
           retention-days: 14

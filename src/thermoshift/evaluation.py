@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from thermoshift._checks import array, require
+from thermoshift.config import SPLITS
 from thermoshift.reading import iter_pairs
 
 
@@ -110,23 +112,55 @@ class ClusterMoments:
 
 def evaluate_policy(root: str | Path, split: str = "test") -> dict[str, Any]:
     """Evaluate the fixed threshold policy on logged states using IPS, SNIPS and oracle outcomes."""
+    require(isinstance(split, str) and split in SPLITS, "unknown split")
     moments = ClusterMoments()
     weight_squared = 0.0
-    for _, x, o in iter_pairs(root, split=split):
-        require(array(x, "row_id") == array(o, "row_id"), "oracle alignment fails")
-        gap = array(x, "obs_temp_last_c") - array(x, "setpoint_c")
-        action = np.where(gap > 1.5, 2, np.where(gap > -0.3, 1, 0))
-        weight = (action == array(x, "action")) / array(x, "propensity").astype(float)
-        true_rewards = np.column_stack([array(o, f"cf_reward_{a}") for a in range(3)]).astype(float)
-        truth = true_rewards[np.arange(len(action)), action]
-        factual = array(x, "y_reward").astype(float)
-        regret = true_rewards.max(axis=1) - truth
-        # cluster columns: count, weighted reward, weight, oracle reward, factual reward, regret
-        values = np.column_stack(
-            [np.ones(len(action)), weight * factual, weight, truth, factual, regret]
-        )
-        moments.add(array(x, "building_id"), values)
-        weight_squared += float(np.dot(weight, weight))
+    with closing(iter_pairs(root, split=split)) as batches:
+        for _, x, o in batches:
+            require(x.num_rows == o.num_rows, "oracle alignment fails")
+            for name in ("row_id", "building_id", "step"):
+                require(array(x, name) == array(o, name), "oracle alignment fails")
+            temperature = array(x, "obs_temp_last_c").astype(float)
+            setpoint = array(x, "setpoint_c").astype(float)
+            require(np.isfinite(temperature) & np.isfinite(setpoint), "nonfinite policy input")
+            gap = temperature - setpoint
+            action = np.where(gap > 1.5, 2, np.where(gap > -0.3, 1, 0))
+            logged_action = array(x, "action")
+            require((logged_action >= 0) & (logged_action < 3), "invalid logged action")
+            propensity = array(x, "propensity").astype(float)
+            require(
+                np.isfinite(propensity) & (propensity > 0) & (propensity <= 1),
+                "invalid logging propensity",
+            )
+            probabilities = np.column_stack([array(x, f"p_action_{a}") for a in range(3)])
+            require(
+                np.isfinite(probabilities) & (probabilities > 0) & (probabilities <= 1),
+                "invalid logging probabilities",
+            )
+            require(
+                np.isclose(probabilities.sum(axis=1), 1, atol=2e-7, rtol=2e-6),
+                "logging probabilities do not sum to 1",
+            )
+            rows = np.arange(len(action))
+            require(
+                propensity == probabilities[rows, logged_action],
+                "selected propensity mismatch",
+            )
+            weight = (action == logged_action) / propensity
+            true_rewards = np.column_stack([array(o, f"cf_reward_{a}") for a in range(3)]).astype(
+                float
+            )
+            require(np.isfinite(true_rewards), "nonfinite oracle reward")
+            truth = true_rewards[rows, action]
+            factual = array(x, "y_reward").astype(float)
+            require(factual == true_rewards[rows, logged_action], "factual reward mismatch")
+            regret = true_rewards.max(axis=1) - truth
+            # count, weighted reward, weight, oracle reward, factual reward, regret
+            values = np.column_stack(
+                [np.ones(len(action)), weight * factual, weight, truth, factual, regret]
+            )
+            moments.add(array(x, "building_id"), values)
+            weight_squared += float(np.dot(weight, weight))
     moments.flush()
     require(moments.total[0] > 0, "no rows found for this split")
     return {

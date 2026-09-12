@@ -19,12 +19,12 @@ from thermoshift import Config
 from thermoshift.filesystem import atomic_json, read_json, sha256
 from thermoshift.hub import publish
 from thermoshift.lifecycle import dataset_lock
-from thermoshift.provenance import load_config, metadata_hashes
-from thermoshift.reading import _iter_pairs, validated_manifest
+from thermoshift.provenance import check_schema_documents, load_config, metadata_hashes
+from thermoshift.reading import _iter_pairs, iter_pairs, validated_manifest
 from thermoshift.schema import FEATURES, feature_roles
 from thermoshift.shards import shard_complete, shard_path
 from thermoshift.simulator import simulate
-from thermoshift.storage import generate, initialize
+from thermoshift.storage import finalize, generate, initialize
 from thermoshift.validation import validate
 
 
@@ -364,3 +364,140 @@ def test_initialization_type_error_precedes_filesystem_mutation(tmp_path):
     with pytest.raises(TypeError, match="Config"):
         initialize(root, {})
     assert not root.exists()
+
+
+@pytest.mark.parametrize("directory", ["data", "partition", "_state"])
+def test_generation_never_writes_through_symlinked_directories(release, directory):
+    item = read_json(release / "manifest.json")["files"][0]
+    linked = (release / item["path"]).parent if directory == "partition" else release / directory
+    moved = release / "redirected-directory"
+    linked.rename(moved)
+    linked.symlink_to(moved, target_is_directory=True)
+    before = {p.relative_to(moved): p.read_bytes() for p in moved.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="symlink"):
+        generate(release)
+    after = {p.relative_to(moved): p.read_bytes() for p in moved.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_generation_never_overwrites_a_symlinked_temporary(release):
+    item = read_json(release / "manifest.json")["files"][0]
+    path = release / item["path"]
+    path.write_bytes(b"corrupt shard forces a rebuild")
+    external = release / "unrelated-file"
+    external.write_bytes(b"preserve this file")
+    temporary = path.with_suffix(".parquet.inprogress")
+    temporary.symlink_to(external)
+    with pytest.raises(ValueError, match="symlink"):
+        generate(release)
+    assert external.read_bytes() == b"preserve this file"
+    assert temporary.is_symlink()
+
+
+@pytest.mark.parametrize("relative", [".lifecycle.lock", "_state/shard-00000000.lock"])
+def test_generation_rejects_symlinked_locks(release, relative):
+    external = release / "unrelated-lock"
+    external.write_bytes(b"preserve this lock")
+    lock = release / relative
+    lock.unlink(missing_ok=True)
+    lock.symlink_to(external)
+    with pytest.raises(ValueError, match="symlink"):
+        generate(release)
+    assert external.read_bytes() == b"preserve this lock"
+
+
+@pytest.mark.parametrize("failure", ["extra_file", "symlink", "incomplete_shard", "card_write"])
+def test_failed_refinalization_clears_old_completion_and_validation(release, monkeypatch, failure):
+    from thermoshift import storage
+
+    validate(release)
+    if failure == "extra_file":
+        (release / "data/extra.parquet").write_bytes(b"unexpected")
+    elif failure == "symlink":
+        (release / "data/redirect").symlink_to(release / "_state", target_is_directory=True)
+    elif failure == "incomplete_shard":
+        (release / "_state/shard-00000000.json").unlink()
+    else:
+
+        def fail_card(*args, **kwargs):
+            raise ValueError("injected card write failure")
+
+        monkeypatch.setattr(storage, "write_card", fail_card)
+    with pytest.raises(ValueError):
+        finalize(release)
+    assert not (release / "_SUCCESS.json").exists()
+    assert not (release / "validation.json").exists()
+
+
+@pytest.mark.parametrize(
+    "document,field,value",
+    [
+        ("manifest.json", None, []),
+        ("_SUCCESS.json", None, []),
+        ("manifest.json", "fingerprint", None),
+        ("manifest.json", "files", None),
+        ("manifest.json", "split_rows", []),
+        ("manifest.json", "split_rows", {}),
+        ("manifest.json", "file", None),
+        ("manifest.json", "file.bytes", "100"),
+        ("manifest.json", "file.kind", []),
+        ("manifest.json", "file.sha256", None),
+    ],
+)
+def test_malformed_release_metadata_raises_value_error(release, document, field, value):
+    path = release / document
+    content = read_json(path)
+    if field is None:
+        content = value
+    elif field == "file":
+        content["files"][0] = value
+    elif field.startswith("file."):
+        content["files"][0][field.split(".")[1]] = value
+    else:
+        content[field] = value
+    atomic_json(path, content)
+    if document == "manifest.json":
+        marker = read_json(release / "_SUCCESS.json")
+        marker["manifest_sha256"] = sha256(path)
+        atomic_json(release / "_SUCCESS.json", marker)
+    with pytest.raises(ValueError):
+        validated_manifest(release, verify_hash=False)
+
+
+@pytest.mark.parametrize("name", ["row_id", "building_id", "step"])
+def test_public_paired_reader_rejects_mismatched_identifiers(release, name):
+    item = next(f for f in read_json(release / "manifest.json")["files"] if f["kind"] == "oracle")
+    path = release / item["path"]
+    table = pq.ParquetFile(path).read()
+    values = table[name].to_numpy().copy()
+    values[0] += 1
+    index = table.schema.get_field_index(name)
+    table = table.set_column(index, table.schema.field(index), pa.array(values))
+    pq.write_table(table, path)
+    resign(release)
+    with pytest.raises(ValueError, match="join mismatch"):
+        list(iter_pairs(release, batch_size=13))
+
+
+def test_schema_repair_flag_requires_a_boolean(tmp_path):
+    with pytest.raises(ValueError, match="repair_missing must be boolean"):
+        check_schema_documents(tmp_path, repair_missing="false")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("field", ["shard_id", "file.shard_id", "file.rows", "file.sha256"])
+def test_malformed_shard_state_is_never_resumed(release, field):
+    path = release / "_state/shard-00000000.json"
+    state = read_json(path)
+    if field == "shard_id":
+        state[field] = False
+    elif field == "file.shard_id":
+        state["files"][0]["shard_id"] = False
+    elif field == "file.rows":
+        state["files"][0]["rows"] = float(state["files"][0]["rows"])
+    else:
+        del state["files"][0]["sha256"]
+    atomic_json(path, state)
+    assert not shard_complete(release, load_config(release), 0, verify_hash=False)
+    assert generate(release)["written"] == 1
+    assert validate(release, replay=True)["status"] == "passed"
