@@ -17,9 +17,6 @@ Synthetic building-cooling trajectories with paired counterfactual outcomes for 
 [![Lint](https://github.com/neuralsorcerer/thermoshift/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/lint.yml?query=branch%3Amain)
 [![CodeQL](https://github.com/neuralsorcerer/thermoshift/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/codeql.yml?query=branch%3Amain)
 [![Documentation](https://github.com/neuralsorcerer/thermoshift/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/docs.yml?query=branch%3Amain)
-[![Dataset on HF: 1B](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-1b)
-[![Dataset on HF: 500M](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-500m)
-[![Dataset on HF: 100M](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-100m)
 [![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
 
 </div>
@@ -214,7 +211,15 @@ Buckets group 1,000 shard IDs. Each shard writes one file per nonempty split per
 configuration, with at most ten Parquet files per shard. Files use Zstandard
 compression, level 3 by default.
 
-## Load and use the data
+## Hugging Face datasets
+
+Published datasets are available in three release sizes:
+
+- **100M decisions:** [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-100m)
+- **500M decisions:** [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-500m)
+- **1B decisions:** [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-1b)
+
+### Load and use the data
 
 ### Stream with Hugging Face Datasets
 
