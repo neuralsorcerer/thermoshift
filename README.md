@@ -17,6 +17,9 @@ Synthetic building-cooling trajectories with paired counterfactual outcomes for 
 [![Lint](https://github.com/neuralsorcerer/thermoshift/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/lint.yml?query=branch%3Amain)
 [![CodeQL](https://github.com/neuralsorcerer/thermoshift/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/codeql.yml?query=branch%3Amain)
 [![Documentation](https://github.com/neuralsorcerer/thermoshift/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/docs.yml?query=branch%3Amain)
+[![Hugging Face: 1B dataset](https://huggingface.co/datasets/neuralsorcerer/thermoshift-1b/badge.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-1b)
+[![Hugging Face: 500M dataset](https://huggingface.co/datasets/neuralsorcerer/thermoshift-500m/badge.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-500m)
+[![Hugging Face: 100M dataset](https://huggingface.co/datasets/neuralsorcerer/thermoshift-100m/badge.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-100m)
 [![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
 
 </div>
