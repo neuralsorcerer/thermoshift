@@ -215,11 +215,11 @@ compression, level 3 by default.
 
 Published datasets are available in three release sizes:
 
-- **100M decisions:** [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-100m)
-- **500M decisions:** [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-500m)
-- **1B decisions:** [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-1b)
-
-### Load and use the data
+| Release | Dataset |
+| --- | --- |
+| 100M decisions | [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-100m) |
+| 500M decisions | [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-500m) |
+| 1B decisions | [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/neuralsorcerer/thermoshift-1b) |
 
 ### Stream with Hugging Face Datasets
 
