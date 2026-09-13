@@ -54,7 +54,13 @@ def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
     # representable.  This is a rare public-API fallback; configured dataset
     # parameters remain on the vectorized float64 path.
     with np.errstate(over="ignore", invalid="ignore"):
-        result = temp + alpha * (outdoor - temp) + (heat_kw - cooling_kw) * heat_response
+        # Keep both differences factored into individually bounded products.
+        # Computing either difference first can overflow even though the scaled
+        # terms and their final sum are representable (notably on platforms
+        # where ``longdouble`` has the same range as float64).
+        ambient = (1.0 - alpha) * temp + alpha * outdoor
+        forcing = heat_kw * heat_response - cooling_kw * heat_response
+        result = ambient + forcing
     if np.any(~np.isfinite(result)):
         wide = [
             value.astype(np.longdouble)
