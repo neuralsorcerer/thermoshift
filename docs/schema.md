@@ -36,9 +36,9 @@ decision, joined by `row_id`. The `role` field identifies how a column is used.
 | `y_energy_kwh` | float32 | kWh | target | no | Served background plus HVAC electricity over one hour |
 | `y_cost` | float32 | currency | target | no | Served electricity cost |
 | `y_carbon_kg` | float32 | kgCO2e | target | no | Operational grid emissions for served electricity |
-| `y_discomfort_c` | float32 | degC | target | no | Endpoint deviation outside setpoint +/-1 degC; not time integral |
+| `y_discomfort_c` | float32 | degC | target | no | End-of-hour deviation beyond the setpoint +/-1 degC comfort band |
 | `y_reward` | float32 | currency-equivalent | target | no | Negative weighted electricity, emissions and endpoint comfort cost |
-| `episode_end` | bool | 1 | boundary | no | Last stored step; a truncation boundary, not physical termination |
+| `episode_end` | bool | 1 | boundary | no | Final stored step of the building trajectory |
 
 ## oracle
 

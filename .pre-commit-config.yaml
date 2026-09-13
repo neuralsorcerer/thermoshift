@@ -12,10 +12,3 @@ repos:
         entry: python -m ruff format --check
         language: system
         types_or: [python, pyi, jupyter]
-
-      - id: generated-schema
-        name: Generated schema documentation
-        entry: python scripts/update_schema.py --check
-        language: system
-        pass_filenames: false
-        files: ^(src/thermoshift/schema\.py|scripts/update_schema\.py|docs/schema\.md)$

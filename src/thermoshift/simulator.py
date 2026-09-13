@@ -25,12 +25,20 @@ def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
         np.asarray(value, dtype=np.float64)
         for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
     )
+    try:
+        temp, outdoor, conductance, capacity, heat_kw, cooling_kw = np.broadcast_arrays(
+            temp, outdoor, conductance, capacity, heat_kw, cooling_kw
+        )
+    except ValueError as error:
+        raise ValueError("thermal inputs must have broadcast-compatible shapes") from error
     if np.any(~np.isfinite(conductance) | (conductance < 0)) or np.any(
         ~np.isfinite(capacity) | (capacity <= 0)
     ):
         raise ValueError(
             "conductance must be finite and nonnegative and capacity must be finite and positive"
         )
+    if any(np.any(~np.isfinite(value)) for value in (temp, outdoor, heat_kw, cooling_kw)):
+        raise ValueError("temperature, outdoor temperature, heat and cooling must be finite")
     # Finite physical inputs can produce an infinite rate; the exponential
     # then correctly saturates at one without overflowing the resulting state.
     with np.errstate(over="ignore", under="ignore"):
@@ -66,6 +74,8 @@ def simulate(
     chooses a bounded building batch. All complete trajectories are building-major.
     Only the dataset's final trajectory may be truncated to obtain an exact row count.
     """
+    if not isinstance(config, Config):
+        raise TypeError("config must be a Config instance")
     integer(start_building, "start_building", 0, config.buildings - 1)
     integer(stop_building, "stop_building", start_building + 1, config.buildings)
     ids = np.arange(start_building, stop_building, dtype=np.int64)

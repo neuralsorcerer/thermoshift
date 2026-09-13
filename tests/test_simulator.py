@@ -45,6 +45,25 @@ def test_thermal_solution_rejects_invalid_physical_parameters(conductance, capac
         thermal_step(20, 30, conductance, capacity, 3, 0)
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (np.nan, 30, 2, 4, 3, 0),
+        (20, np.inf, 2, 4, 3, 0),
+        (20, 30, 2, 4, -np.inf, 0),
+        (20, 30, 2, 4, 3, np.nan),
+    ],
+)
+def test_thermal_solution_rejects_nonfinite_forcing(arguments):
+    with pytest.raises(ValueError, match="must be finite"):
+        thermal_step(*arguments)
+
+
+def test_thermal_solution_reports_incompatible_shapes():
+    with pytest.raises(ValueError, match="broadcast-compatible"):
+        thermal_step(np.zeros(2), np.zeros(3), 2, 4, 3, 0)
+
+
 def test_thermal_solution_handles_overflowing_rate():
     # With C/G far below one hour, temperature reaches the forced equilibrium.
     with np.errstate(divide="raise", invalid="raise", over="raise"):
@@ -61,6 +80,11 @@ def test_batch_size_does_not_change_numeric_records():
     assert large_x.equals(pa.concat_tables([x for x, _, _ in pieces]))
     assert large_o.equals(pa.concat_tables([o for _, o, _ in pieces]))
     np.testing.assert_array_equal(large_s, np.concatenate([s for _, _, s in pieces]))
+
+
+def test_simulate_requires_config_instance_before_accessing_it():
+    with pytest.raises(TypeError, match="Config instance"):
+        simulate({}, 0, 1)
 
 
 def test_ids_remain_int64_beyond_two_billion_rows():
