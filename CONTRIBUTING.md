@@ -21,6 +21,18 @@ python scripts/update_schema.py --check
 python -m pytest
 ```
 
+The development extra also installs pre-commit. Run the fast, file-aware checks
+across the repository before committing:
+
+```bash
+python -m pre_commit run --all-files
+```
+
+Install the hooks in a local clone with `python -m pre_commit install` if you
+want the same checks to run automatically on every commit. The full test suite
+remains a separate required check because it is intentionally not run by the
+commit hook.
+
 Tests cover configuration, physical equations, trajectory continuity, sampling,
 row coverage, file integrity, interruption recovery, process leases, policy
 statistics, CLI behavior, and publication. Publication tests use an in-memory
