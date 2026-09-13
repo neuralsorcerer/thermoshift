@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 
 from thermoshift.config import SPLITS, Config, boolean
 from thermoshift.filesystem import dataset_path, read_json, sha256
@@ -84,6 +85,15 @@ def shard_complete(
                 return False
             if verify_hash and sha256(full) != f["sha256"]:
                 return False
+            # State files are resumable checkpoints rather than a trust
+            # boundary.  Validate the inexpensive Parquet footer as well as
+            # its recorded digest so a self-consistent but malformed
+            # checkpoint is regenerated instead of later being finalized.
+            with pq.ParquetFile(full) as parquet:
+                if parquet.metadata.num_rows != f["rows"] or not parquet.schema_arrow.equals(
+                    SCHEMAS[f["kind"]], check_metadata=True
+                ):
+                    return False
         return True
     except (OSError, KeyError, ValueError, TypeError):
         return False

@@ -262,6 +262,27 @@ def test_failure_between_parquet_commit_and_shard_state_is_recoverable(tmp_path,
     assert validate(tmp_path, replay=True)["status"] == "passed"
 
 
+def test_resume_rejects_checkpoint_with_invalid_parquet_schema(release):
+    config = load_config(release)
+    item = read_json(release / "manifest.json")["files"][0]
+    path = release / item["path"]
+    table = pq.read_table(path)
+    index = table.schema.get_field_index("row_id")
+    table = table.set_column(index, pa.field("row_id", pa.int64()), table.column(index))
+    pq.write_table(table, path)
+
+    state_path = release / "_state" / f"shard-{item['shard_id']:08d}.json"
+    state = read_json(state_path)
+    entry = next(file for file in state["files"] if file["path"] == item["path"])
+    entry["bytes"], entry["sha256"] = path.stat().st_size, sha256(path)
+    atomic_json(state_path, state)
+
+    assert not shard_complete(release, config, item["shard_id"])
+    result = generate(release, batch_buildings=7, progress=None)
+    assert result["written"] == 1
+    assert validate(release)["status"] == "passed"
+
+
 def test_verified_resume_removes_only_known_shard_temporaries(release):
     item = read_json(release / "manifest.json")["files"][0]
     temporary = (release / item["path"]).with_suffix(".parquet.inprogress")

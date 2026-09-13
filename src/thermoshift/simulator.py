@@ -49,7 +49,43 @@ def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
     small = rate < 1e-8
     heat_response = np.divide(alpha, conductance, out=np.zeros_like(rate), where=~small)
     np.divide(1.0 - 0.5 * rate, capacity, out=heat_response, where=small)
-    return temp + alpha * (outdoor - temp) + (heat_kw - cooling_kw) * heat_response
+    # Retry exceptional float64 intermediates in extended precision: opposing
+    # extreme terms may overflow separately even when their final sum is
+    # representable.  This is a rare public-API fallback; configured dataset
+    # parameters remain on the vectorized float64 path.
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = temp + alpha * (outdoor - temp) + (heat_kw - cooling_kw) * heat_response
+    if np.any(~np.isfinite(result)):
+        wide = [
+            value.astype(np.longdouble)
+            for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
+        ]
+        wide_temp, wide_outdoor, wide_conductance, wide_capacity, wide_heat, wide_cooling = wide
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            wide_rate = wide_conductance / wide_capacity
+            wide_alpha = -np.expm1(-wide_rate)
+            wide_small = wide_rate < 1e-8
+            wide_response = np.divide(
+                wide_alpha,
+                wide_conductance,
+                out=np.zeros_like(wide_rate),
+                where=~wide_small,
+            )
+            np.divide(
+                1 - wide_rate / 2,
+                wide_capacity,
+                out=wide_response,
+                where=wide_small,
+            )
+            wide_result = (
+                wide_temp
+                + wide_alpha * (wide_outdoor - wide_temp)
+                + (wide_heat - wide_cooling) * wide_response
+            )
+            result = wide_result.astype(np.float64)
+        if np.any(~np.isfinite(result)):
+            raise ValueError("thermal inputs produce a nonfinite temperature")
+    return result
 
 
 def _buffer(schema, n, steps):

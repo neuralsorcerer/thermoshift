@@ -71,6 +71,22 @@ def test_thermal_solution_handles_overflowing_rate():
     assert result == pytest.approx(33.0)
 
 
+def test_thermal_solution_recovers_representable_result_after_intermediate_overflow():
+    result = thermal_step(1e308, -1e308, 1, 1, -1e308, 1e308)
+    alpha = -np.expm1(np.longdouble(-1))
+    expected = (
+        np.longdouble(1e308)
+        + alpha * (np.longdouble(-1e308) - np.longdouble(1e308))
+        + (np.longdouble(-1e308) - np.longdouble(1e308)) * alpha
+    )
+    assert result == pytest.approx(float(expected))
+
+
+def test_thermal_solution_rejects_truly_nonfinite_result_from_finite_inputs():
+    with pytest.raises(ValueError, match="produce a nonfinite temperature"):
+        thermal_step(1e308, 1e308, 0, 1, 1e308, -1e308)
+
+
 def test_batch_size_does_not_change_numeric_records():
     config = Config(rows=168 * 41 - 7)
     large_x, large_o, large_s = simulate(config, 0, config.buildings)
