@@ -20,6 +20,27 @@ def run_notebook(tmp_path, sources):
     return nbformat.read(path, as_version=4)
 
 
+def test_only_code_cells_are_counted_and_executed(tmp_path):
+    path = tmp_path / "mixed.ipynb"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[
+                nbformat.v4.new_markdown_cell("# Heading"),
+                nbformat.v4.new_code_cell("marker = 'ran'"),
+                nbformat.v4.new_raw_cell("raw payload"),
+                nbformat.v4.new_markdown_cell("Trailing prose"),
+                nbformat.v4.new_code_cell("marker"),
+            ]
+        ),
+        path,
+    )
+    assert execute(path, tmp_path) == 2
+    saved = nbformat.read(path, as_version=4)
+    assert [cell.get("execution_count") for cell in saved.cells] == [None, 1, None, None, 2]
+    assert saved.cells[-1].outputs[0].data["text/plain"] == "'ran'"
+    assert not any("outputs" in cell for cell in saved.cells if cell.cell_type == "markdown")
+
+
 def test_future_annotations_persist_across_cells(tmp_path):
     notebook = run_notebook(
         tmp_path,

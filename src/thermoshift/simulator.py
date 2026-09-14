@@ -49,18 +49,21 @@ def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
     small = rate < 1e-8
     heat_response = np.divide(alpha, conductance, out=np.zeros_like(rate), where=~small)
     np.divide(1.0 - 0.5 * rate, capacity, out=heat_response, where=small)
-    # Retry exceptional float64 intermediates in extended precision: opposing
-    # extreme terms may overflow separately even when their final sum is
-    # representable.  This is a rare public-API fallback; configured dataset
-    # parameters remain on the vectorized float64 path.
+    # Keep both differences factored into individually bounded products. Since
+    # alpha is in [0, 1] and heat_response is at most 1/capacity, every term
+    # here is bounded by its own input, so computing the ambient or forcing
+    # difference first can overflow even when all scaled terms and their final
+    # sum are representable.
     with np.errstate(over="ignore", invalid="ignore"):
-        # Keep both differences factored into individually bounded products.
-        # Computing either difference first can overflow even though the scaled
-        # terms and their final sum are representable (notably on platforms
-        # where ``longdouble`` has the same range as float64).
         ambient = (1.0 - alpha) * temp + alpha * outdoor
         forcing = heat_kw * heat_response - cooling_kw * heat_response
         result = ambient + forcing
+    # The opposite ordering covers the opposite extreme: a heat response far
+    # above one overflows each separate product while the difference stays
+    # representable. Retry those exceptional intermediates with the difference
+    # taken first, in extended precision where the platform provides it. This
+    # is a rare public-API fallback; configured dataset parameters remain on
+    # the vectorized float64 path above.
     if np.any(~np.isfinite(result)):
         wide = [
             value.astype(np.longdouble)

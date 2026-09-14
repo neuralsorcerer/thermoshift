@@ -322,6 +322,45 @@ def test_first_publication_creates_new_repository_with_requested_visibility(
     assert ready and "_SUCCESS.json" in hub.trees[hub.head]
 
 
+def test_new_repository_on_another_branch_is_refused_before_creation(release, hub, monkeypatch):
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    def missing(**kw):
+        raise RepositoryNotFoundError(
+            "mock missing repository",
+            response=httpx.Response(
+                404,
+                request=httpx.Request("GET", "https://huggingface.co/api/datasets/unit-test/new"),
+            ),
+        )
+
+    def forbidden(**kw):
+        raise AssertionError("a repository must not be created for a non-main revision")
+
+    monkeypatch.setattr(hub, "repo_info", missing)
+    monkeypatch.setattr(hub, "create_repo", forbidden, raising=False)
+    with pytest.raises(ValueError, match="new repositories require revision main"):
+        publish(release, "unit-test/new", public=True, revision="release-1")
+
+
+def test_remote_branch_with_foreign_content_is_refused(release, hub):
+    hub.commit(hub.head, {"someone-elses-notes.md": b"a different project lives here"})
+    with pytest.raises(ValueError, match="no matching ThermoShift publication intent"):
+        publish(release, "unit-test/release", public=True)
+    assert "_PUBLICATION.json" not in hub.trees[hub.head]
+
+
+def test_foreign_data_beside_a_matching_release_is_refused_before_any_upload(release, hub):
+    # The intent matches, so only the stray shard can trip the data guard.
+    publish(release, "unit-test/release", public=True)
+    hub.commit(hub.head, {"data/logged/train/00000/part-99999999.parquet": b"stale shard"})
+    before = hub.head
+    with pytest.raises(ValueError, match="additional data files"):
+        publish(release, "unit-test/release", public=True)
+    # The guard fires before the provenance commit, so the branch is untouched.
+    assert hub.head == before
+
+
 def test_missing_branch_is_reported_before_upload(release, hub, monkeypatch):
     from huggingface_hub.errors import RevisionNotFoundError
 

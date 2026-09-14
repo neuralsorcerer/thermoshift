@@ -1,4 +1,5 @@
-include LICENSE README.md CONTRIBUTING.md constraints.txt
+include LICENSE README.md CONTRIBUTING.md constraints.txt .pre-commit-config.yaml
+include src/thermoshift/py.typed
 recursive-include src/thermoshift/resources *.md
 recursive-include docs *.md *.py *.txt
 prune docs/_build

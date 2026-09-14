@@ -14,6 +14,7 @@ import yaml
 from thermoshift import Config
 from thermoshift.filesystem import atomic_json, read_json, sha256
 from thermoshift.provenance import load_config
+from thermoshift.shards import shard_path
 from thermoshift.storage import finalize, generate, initialize
 from thermoshift.validation import validate
 
@@ -72,6 +73,26 @@ def test_checksum_resume_and_same_size_corruption_recovery(tmp_path):
     repaired = generate(tmp_path, batch_buildings=15, progress=None)
     assert repaired["written"] == 1
     assert {f: sha256(tmp_path / f) for f in hashes} == hashes
+    validate(tmp_path)
+
+
+def test_generation_clears_the_completion_marker_and_validation_report(tmp_path):
+    # A release being written must not still advertise itself as complete and
+    # validated. A single-rank run finalizes at the end and rewrites both files, so
+    # the distributed path is where this matters: it never finalizes, and stale
+    # documents would survive a rerun describing partly regenerated data.
+    initialize(tmp_path, Config(rows=200, episode_steps=24, shard_buildings=5))
+    generate(tmp_path, progress=None)
+    validate(tmp_path)
+    assert (tmp_path / "_SUCCESS.json").is_file()
+    assert (tmp_path / "validation.json").is_file()
+
+    generate(tmp_path, rank=0, world_size=2, progress=None)
+    assert not (tmp_path / "_SUCCESS.json").exists()
+    assert not (tmp_path / "validation.json").exists()
+
+    generate(tmp_path, rank=1, world_size=2, progress=None)
+    finalize(tmp_path)
     validate(tmp_path)
 
 
@@ -175,3 +196,34 @@ def test_corrupt_target_detected_even_with_updated_checksum(tmp_path):
     )
     with pytest.raises(ValueError, match="counterfactual mismatch"):
         validate(tmp_path)
+
+
+def test_shard_paths_match_the_documented_release_layout():
+    # README and docs/generation.md publish this layout as
+    # data/<kind>/<split>/<bucket>/part-*.parquet and consumers read the tree
+    # directly. Every path in the package comes from this one function, so a changed
+    # bucket size or field width stays self-consistent and silently reshapes the
+    # published release instead of failing.
+    assert shard_path("logged", "train", 0) == "data/logged/train/00000/part-00000000.parquet"
+    assert shard_path("oracle", "test", 1) == "data/oracle/test/00000/part-00000001.parquet"
+    # A thousand shards per bucket directory, and the widths the names are padded
+    # to; the rollover is what fixes the divisor.
+    assert shard_path("logged", "train", 999) == "data/logged/train/00000/part-00000999.parquet"
+    assert shard_path("logged", "train", 1000) == "data/logged/train/00001/part-00001000.parquet"
+    assert (
+        shard_path("logged", "test_heatwave", 1_000_000)
+        == "data/logged/test_heatwave/01000/part-01000000.parquet"
+    )
+
+
+def test_bundled_sample_release_matches_the_layout_the_generator_produces():
+    # sample_dataset/ is a committed release README tells readers to load. It is
+    # pruned from the source distribution, so guard for it not being on disk.
+    root = Path(__file__).resolve().parents[1] / "sample_dataset"
+    if not (root / "manifest.json").is_file():
+        pytest.skip("bundled sample release is not present in this checkout")
+    files = read_json(root / "manifest.json")["files"]
+    assert files, "bundled sample release lists no files"
+    for item in files:
+        assert item["path"] == shard_path(item["kind"], item["split"], item["shard_id"])
+        assert (root / item["path"]).is_file()

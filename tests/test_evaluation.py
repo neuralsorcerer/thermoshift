@@ -4,6 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
+from fractions import Fraction
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -56,6 +59,62 @@ def test_large_offset_does_not_cancel_cluster_variance():
     )
 
 
+def test_anchoring_survives_a_large_offset_with_uneven_denominators():
+    # Ratio (1, 0) cannot see this: its denominator is the row count, identical in
+    # every cluster, which zeroes the denominator row of the co-moment matrix and
+    # drops the correction term. SNIPS divides by summed weights, which differ per
+    # cluster, so the matrix has to cancel: anchored its entries are 7.1e7 against
+    # an answer needing 8.0e7, unanchored they reach 7.8e25 and must still land on
+    # 8.0e7, which float64 cannot do.
+    rng = np.random.default_rng(7)
+    clusters, per_cluster = 8, 5
+    ids = np.repeat(np.arange(clusters), per_cluster)
+    n = clusters * per_cluster
+    rewards = 1e12 + rng.normal(0, 1e3, n)
+    weights = rng.gamma(2, 2, n)
+    values = np.column_stack(
+        [np.ones(n), weights * rewards, weights, rewards, rewards, np.abs(rng.normal(0, 1, n))]
+    )
+
+    # Exact rational arithmetic decides what the answer is.
+    totals = [
+        (
+            sum(Fraction(v) for v in values[ids == g][:, 1]),
+            sum(Fraction(v) for v in values[ids == g][:, 2]),
+        )
+        for g in range(clusters)
+    ]
+    denominator = sum(d for _, d in totals)
+    ratio = sum(z for z, _ in totals) / denominator
+    residual_ss = sum((z - ratio * d) ** 2 for z, d in totals)
+    exact = math.sqrt(float(residual_ss * Fraction(clusters, clusters - 1) / denominator**2))
+
+    def run(anchored):
+        moments = evaluation.ClusterMoments()
+        if not anchored:
+            # A non-NaN anchor is never replaced and reads as zero, so this is
+            # exactly the state the class would be in with the anchoring removed.
+            moments.anchor[:] = 0.0
+        for start, stop in ((0, 13), (13, 29), (29, n)):  # clusters split across chunks
+            moments.add(ids[start:stop], values[start:stop])
+        moments.flush()
+        return moments
+
+    # The tolerance is the floor of the arithmetic. Each cluster total is ~2e13
+    # against a residual of ~9e3, so the subtraction keeps only ULP(2e13) / 9e3 ~
+    # 2e-7 however it is arranged. Measured across 200 seeds the worst case is
+    # 5.7e-7 and the constant moves about 2x between platforms.
+    anchored = run(anchored=True)
+    assert anchored.ratio(1, 2)["se_building_cluster"] == pytest.approx(exact, rel=1e-5)
+
+    # Keep the fixture honest: a later edit must not shrink the offset and leave a
+    # test that cannot fail. Compare second moments rather than the standard errors
+    # they produce -- sums of squares are accurate on both sides, where an
+    # unanchored standard error is whatever an 18-digit cancellation leaves.
+    j = evaluation.ClusterMoments.PAIRS.index((1, 2))
+    assert np.abs(run(anchored=False).m2[j]).max() > 1e15 * np.abs(anchored.m2[j]).max()
+
+
 def test_cluster_order_and_empty_input():
     m = evaluation.ClusterMoments()
     m.add(np.array([], dtype=int), np.empty((0, 6)))
@@ -65,6 +124,16 @@ def test_cluster_order_and_empty_input():
     m.flush()
     with pytest.raises(ValueError, match="reopen"):
         m.add(np.array([1]), np.ones((1, 6)))
+
+
+def test_flushing_without_a_pending_building_is_a_no_op():
+    m = evaluation.ClusterMoments()
+    m.flush()
+    assert m.count == 0 and m.ratio(1, 0)["value"] is None
+    m.add(np.array([4]), np.ones((1, 6)))
+    m.flush()
+    m.flush()
+    assert m.count == 1 and m.ratio(1, 0)["value"] == 1.0
 
 
 def test_no_overlap_has_no_misleading_zero_width_ips_interval():
@@ -163,6 +232,29 @@ def test_invalid_policy_data_fails_and_closes_reader(
     with pytest.raises(ValueError, match=message):
         evaluation.evaluate_policy("unused")
     assert closed == [True]
+
+
+def test_logging_probabilities_that_do_not_sum_to_one_are_rejected(monkeypatch, policy_tables):
+    # Scaling all three probabilities and the propensity together keeps every other
+    # guard satisfied -- each value stays inside (0, 1] and the selected propensity
+    # still matches its column -- so only the simplex check can fire. A release read
+    # here has not necessarily been through validate().
+    logged, oracle = policy_tables
+    for column in ("p_action_0", "p_action_1", "p_action_2", "propensity"):
+        field = logged.schema.field(column)
+        scaled = [value * 0.9 for value in logged[column].to_pylist()]
+        logged = logged.set_column(
+            logged.schema.get_field_index(column), field, pa.array(scaled, type=field.type)
+        )
+    probabilities = np.column_stack([logged[f"p_action_{a}"].to_numpy() for a in range(3)])
+    assert (probabilities > 0).all() and (probabilities <= 1).all()
+
+    def batches(*args, **kwargs):
+        yield {}, logged, oracle
+
+    monkeypatch.setattr(evaluation, "iter_pairs", batches)
+    with pytest.raises(ValueError, match="logging probabilities do not sum to 1"):
+        evaluation.evaluate_policy("unused")
 
 
 @pytest.mark.parametrize("split", [None, "unknown", 1, []])

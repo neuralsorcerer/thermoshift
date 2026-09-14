@@ -7,6 +7,7 @@
 """Failure recovery, API boundaries and resource cleanup."""
 
 import multiprocessing
+import shutil
 from pathlib import Path
 
 import nbformat
@@ -180,6 +181,342 @@ def test_missing_provenance_or_default_config_fields_are_rejected(release, field
         load_config(release)
 
 
+@pytest.mark.parametrize(
+    "mutation,message",
+    [
+        ("short_digest", "invalid source SHA-256"),
+        ("uppercase_digest", "invalid source SHA-256"),
+        ("digest_not_a_string", "invalid source SHA-256"),
+        ("fingerprint", "fingerprint mismatch"),
+        ("config_value", "fingerprint mismatch"),
+    ],
+)
+def test_tampered_provenance_digests_are_rejected(release, mutation, message):
+    document = read_json(release / "run_config.json")
+    if mutation == "short_digest":
+        document["source_sha256"] = "abc123"
+    elif mutation == "uppercase_digest":
+        document["source_sha256"] = document["source_sha256"].upper()
+    elif mutation == "digest_not_a_string":
+        document["source_sha256"] = ["0" * 64]
+    elif mutation == "fingerprint":
+        document["fingerprint"] = "0" * 64
+    else:
+        # A changed setting no longer hashes to the recorded fingerprint.
+        document["config"]["seed"] = document["config"]["seed"] + 1
+    atomic_json(release / "run_config.json", document)
+    with pytest.raises(ValueError, match=message):
+        load_config(release)
+
+
+@pytest.mark.parametrize(
+    "operation", [generate, finalize, validate, validated_manifest, iter_pairs]
+)
+def test_operations_name_a_missing_dataset_directory(tmp_path, operation):
+    missing = tmp_path / "never-initialized"
+    with pytest.raises(ValueError, match="does not exist; initialize it first"):
+        result = operation(missing)
+        if operation is iter_pairs:
+            next(result)
+
+
+def test_shard_state_row_counts_must_match_the_plan(release):
+    config = load_config(release)
+    path = release / "_state/shard-00000000.json"
+    state = read_json(path)
+    state["files"][0]["rows"] += 1
+    atomic_json(path, state)
+    assert not shard_complete(release, config, 0, verify_hash=False)
+
+
+def test_a_failed_atomic_write_leaves_the_previous_file_and_no_temporary(tmp_path, monkeypatch):
+    # "Atomic" means the destination is only ever reached by the rename, so a
+    # failure cannot leave it half written, and the temporary never outlives the
+    # attempt.
+    import os
+
+    from thermoshift.filesystem import atomic_bytes
+
+    target = tmp_path / "nested" / "document.json"
+    target.parent.mkdir()
+    target.write_bytes(b"original\n")
+
+    def fail(*args, **kwargs):
+        raise OSError("injected rename failure")
+
+    monkeypatch.setattr(os, "replace", fail)
+    with pytest.raises(OSError, match="injected rename failure"):
+        atomic_bytes(target, b"replacement\n")
+    assert target.read_bytes() == b"original\n"
+    assert [p.name for p in target.parent.iterdir()] == ["document.json"]
+
+
+def test_atomic_json_refuses_nonfinite_numbers_instead_of_writing_invalid_json(tmp_path):
+    # NaN and the infinities are not JSON. Python writes them as bare NaN and
+    # Infinity tokens that a strict parser rejects, so a release document holding
+    # one would be unreadable outside Python rather than merely wrong.
+    from thermoshift.filesystem import atomic_json
+
+    for value in (float("nan"), float("inf"), float("-inf")):
+        target = tmp_path / "document.json"
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            atomic_json(target, {"value": value})
+        assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_json_does_not_depend_on_the_order_keys_were_added(tmp_path):
+    # The completion marker binds manifest.json by its bytes, so the same content
+    # has to serialize the same way however the document was assembled.
+    from thermoshift.filesystem import atomic_json
+
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    atomic_json(first, {"zebra": 1, "alpha": {"n": 2, "m": 3}, "middle": 4})
+    atomic_json(second, {"middle": 4, "alpha": {"m": 3, "n": 2}, "zebra": 1})
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_commit_refuses_a_destination_redirected_after_the_temporary_opened(tmp_path, monkeypatch):
+    # The destination is resolved again at commit time because nothing keeps a
+    # path symlink-free between opening the temporary and replacing it into
+    # place. Joining the pieces directly instead would follow a parent that
+    # turned into a redirect and land the shard outside the release entirely.
+    from thermoshift import storage
+
+    initialize(tmp_path, Config(rows=200, episode_steps=24))
+    real_expected = storage.expected_shard
+    redirected = []
+
+    def redirect_then_delegate(config, shard_id):
+        # Called once the writers have produced their temporaries and just before
+        # the commit loop resolves each destination. Point the redirect at the
+        # real directory so every temporary stays reachable and the only thing
+        # that has changed is that a component is now a symlink.
+        if not redirected:
+            for parent in sorted((tmp_path / "data/logged").iterdir()):
+                if parent.is_dir() and not parent.is_symlink():
+                    moved = parent.with_name(parent.name + "-real")
+                    parent.rename(moved)
+                    parent.symlink_to(moved, target_is_directory=True)
+                    redirected.append(parent)
+                    break
+        return real_expected(config, shard_id)
+
+    monkeypatch.setattr(storage, "expected_shard", redirect_then_delegate)
+    with pytest.raises(ValueError, match="symlinks and junctions are not allowed"):
+        generate(tmp_path, progress=None)
+    assert redirected, "the redirect was never installed, so nothing was tested"
+    assert not (tmp_path / "_SUCCESS.json").exists()
+
+
+def reseal(root):
+    """Re-sign the completion marker only, leaving the manifest exactly as edited."""
+    atomic_json(
+        root / "_SUCCESS.json",
+        {
+            "manifest_sha256": sha256(root / "manifest.json"),
+            "metadata_sha256": metadata_hashes(root),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper,message",
+    [
+        ("manifest_rows", "total row count mismatch"),
+        ("manifest_bytes", "manifest byte accounting mismatch"),
+        ("manifest_buildings", "total building count mismatch"),
+        ("file_bytes", "file size mismatch"),
+        ("file_rows", "manifest does not cover the configured rows"),
+        ("file_sha256_format", "invalid file SHA-256"),
+        ("file_shard_id", "shard range mismatch"),
+        ("split_rows", "split row count mismatch"),
+        ("parquet_rows", "Parquet row count mismatch"),
+        ("parquet_schema", "Arrow schema mismatch"),
+    ],
+)
+def test_wellformed_but_wrong_release_metadata_is_rejected_without_hashes(release, tamper, message):
+    # Every type stays valid and only the value is wrong, which is what a tampered
+    # or half-rewritten release looks like. Run with verify_hash disabled: that
+    # documented fast path skips the per-file checksums, leaving these structural
+    # checks as the only thing standing behind it.
+    manifest = read_json(release / "manifest.json")
+    entry = manifest["files"][0]
+    target = release / entry["path"]
+    if tamper == "manifest_rows":
+        manifest["rows"] += 1
+    elif tamper == "manifest_bytes":
+        manifest["bytes"] += 1
+    elif tamper == "manifest_buildings":
+        manifest["buildings"] += 1
+    elif tamper == "file_sha256_format":
+        entry["sha256"] = "z" * 64
+    elif tamper == "file_shard_id":
+        entry["shard_id"] += 10_000
+    elif tamper == "file_rows":
+        entry["rows"] += 1
+    elif tamper == "split_rows":
+        manifest["split_rows"]["train"] += 1
+    elif tamper == "file_bytes":
+        # Keep the aggregate consistent so the per-file size check is what fires.
+        entry["bytes"] += 1
+        manifest["bytes"] = sum(f["bytes"] for f in manifest["files"])
+    else:
+        table = pq.ParquetFile(target).read()
+        if tamper == "parquet_rows":
+            table = table.slice(0, table.num_rows - 1)
+        else:
+            table = table.append_column("extra", pa.array([0] * table.num_rows, type=pa.int8()))
+        pq.write_table(table, target)
+        # Make the release agree with the rewritten file everywhere else, so only
+        # the Parquet footer can tell that its contents are wrong.
+        entry["bytes"], entry["sha256"] = target.stat().st_size, sha256(target)
+        manifest["bytes"] = sum(f["bytes"] for f in manifest["files"])
+    atomic_json(release / "manifest.json", manifest)
+    reseal(release)
+    with pytest.raises(ValueError, match=message):
+        validated_manifest(release, verify_hash=False)
+
+
+@pytest.mark.parametrize("change", ["stray", "missing"])
+def test_data_tree_must_hold_exactly_the_files_the_manifest_lists(release, change):
+    # finalize() refuses to seal a release with unexpected files under data/, and
+    # the reader has to make the same judgement about one it did not build: a file
+    # added or removed afterwards leaves every manifest entry internally consistent,
+    # so comparing the tree against the manifest is the only check that looks at
+    # what is on disk.
+    entry = read_json(release / "manifest.json")["files"][0]
+    listed = release / entry["path"]
+    if change == "stray":
+        shutil.copyfile(listed, listed.parent / "part-00009999.parquet")
+    else:
+        listed.unlink()
+    with pytest.raises(ValueError, match="unexpected/missing Parquet file"):
+        validated_manifest(release, verify_hash=False)
+
+
+def test_skipping_hashes_still_reads_a_release_whose_checksums_are_wrong(release):
+    # The documented meaning of verify_hash=False: a checksum that is well formed
+    # but wrong is simply not consulted. Asserting it keeps the fast path honest
+    # about what it does and does not promise.
+    manifest = read_json(release / "manifest.json")
+    manifest["files"][0]["sha256"] = "0" * 64
+    atomic_json(release / "manifest.json", manifest)
+    reseal(release)
+    assert validated_manifest(release, verify_hash=False)
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        validated_manifest(release, verify_hash=True)
+
+
+def test_manifest_edited_after_finalize_is_rejected_by_the_completion_marker(release):
+    # Every manifest field is cross-checked against the configuration or the files,
+    # so the content checks pin all of them. What they cannot see is an added key,
+    # which a reader would then be trusting although finalize never wrote it.
+    # Binding the manifest bytes to the completion marker is what catches that.
+    path = release / "manifest.json"
+    manifest = read_json(path)
+    assert validated_manifest(release)  # the untouched release validates
+    manifest["retracted"] = True
+    atomic_json(path, manifest)
+    with pytest.raises(ValueError, match="manifest is not finalized"):
+        validated_manifest(release)
+    # Re-signing the marker makes it a legitimately finalized release again, so
+    # the marker is doing this on its own rather than some later content check.
+    resign(release)
+    assert validated_manifest(release)
+
+
+def _shard_state(release, shard_id=0):
+    return release / f"_state/shard-{shard_id:08d}.json"
+
+
+# A checkpoint that does not belong to this release would let resume mix shards
+# from different configurations into one output. initialize() and generate()
+# reject a changed configuration or runtime before resume gets this far, so these
+# cover the checkpoint's own contract: a state file copied in from elsewhere, or
+# a shard that rotted after it was committed.
+def test_shard_state_from_a_different_configuration_is_not_reused(release):
+    config = load_config(release)
+    path = _shard_state(release)
+    state = read_json(path)
+    assert shard_complete(release, config, 0)
+    state["fingerprint"] = "0" * 64
+    atomic_json(path, state)
+    assert not shard_complete(release, config, 0)
+
+
+def test_shard_state_is_not_reused_when_its_provenance_digest_disagrees(release):
+    config = load_config(release)
+    path = _shard_state(release)
+    state = read_json(path)
+    state["provenance_sha256"] = "0" * 64
+    atomic_json(path, state)
+    assert not shard_complete(release, config, 0)
+
+
+def test_self_consistent_shard_state_with_wrong_parquet_contents_is_rejected(release):
+    # The footer check exists for exactly this: a checkpoint that agrees with
+    # itself on size and checksum, and with the plan on row counts, while the
+    # Parquet file behind it holds a different number of rows. Every other guard
+    # passes, so without the footer this shard would be kept and finalized.
+    config = load_config(release)
+    path = _shard_state(release)
+    state = read_json(path)
+    entry = state["files"][0]
+    target = release / entry["path"]
+    table = pq.ParquetFile(target).read()
+    pq.write_table(table.slice(0, table.num_rows - 1), target)
+    entry["bytes"], entry["sha256"] = target.stat().st_size, sha256(target)
+    atomic_json(path, state)
+    assert entry["rows"] == read_json(path)["files"][0]["rows"]  # still the planned count
+    assert not shard_complete(release, config, 0)
+
+
+def test_shard_state_agreeing_with_its_file_but_not_the_plan_is_rejected(release):
+    # The mirror of the case above. Here the checkpoint and its Parquet file
+    # agree with each other and only the plan disagrees, which is what a shard
+    # left behind by a different row budget looks like. The footer check cannot
+    # see it, so the comparison against the planned counts is what rejects it.
+    config = load_config(release)
+    path = _shard_state(release)
+    state = read_json(path)
+    entry = state["files"][0]
+    target = release / entry["path"]
+    table = pq.ParquetFile(target).read()
+    pq.write_table(table.slice(0, table.num_rows - 1), target)
+    entry["rows"] = table.num_rows - 1
+    entry["bytes"], entry["sha256"] = target.stat().st_size, sha256(target)
+    atomic_json(path, state)
+    assert not shard_complete(release, config, 0)
+
+
+def test_shard_file_replaced_by_a_symlink_is_not_reused(release):
+    config = load_config(release)
+    entry = read_json(_shard_state(release))["files"][0]
+    target = release / entry["path"]
+    moved = target.with_suffix(".moved")
+    target.rename(moved)
+    target.symlink_to(moved)
+    # The bytes behind the link are the committed ones, so size and checksum both
+    # still agree; only refusing the redirect rejects it.
+    assert sha256(target) == entry["sha256"]
+    assert not shard_complete(release, config, 0)
+
+
+@pytest.mark.parametrize("damage", ["truncated", "emptied"])
+def test_shard_file_whose_size_no_longer_matches_is_not_reused(release, damage):
+    config = load_config(release)
+    entry = read_json(_shard_state(release))["files"][0]
+    target = release / entry["path"]
+    keep = 0 if damage == "emptied" else entry["bytes"] // 2
+    with target.open("r+b") as handle:
+        handle.truncate(keep)
+    assert target.stat().st_size != entry["bytes"]
+    # Size alone has to reject these: an empty or half-written shard has no
+    # readable footer, so a later guard would raise rather than return False.
+    assert not shard_complete(release, config, 0, verify_hash=False)
+
+
 def test_numeric_order_when_shard_filename_padding_width_is_exceeded(tmp_path):
     # Two sparse files per configuration test this boundary without generating
     # one hundred million shards. Both are deliberately assigned the same split.
@@ -293,6 +630,34 @@ def test_verified_resume_removes_only_known_shard_temporaries(release):
     assert not temporary.exists() and unrelated.is_file()
 
 
+def test_worker_death_is_reported_with_a_remedy(tmp_path, monkeypatch):
+    # A worker that raises reports through its future; one killed by the system
+    # only breaks the pool, which must not surface as an unhandled RuntimeError.
+    from concurrent.futures.process import BrokenProcessPool
+
+    from thermoshift import storage
+
+    class DeadPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *details):
+            return False
+
+        def submit(self, *args, **kwargs):
+            raise BrokenProcessPool("mock worker terminated abruptly")
+
+    initialize(tmp_path, Config(rows=96, episode_steps=8, shard_buildings=2))
+    monkeypatch.setattr(storage, "ProcessPoolExecutor", DeadPool)
+    with pytest.raises(OSError, match="worker exited without reporting") as failure:
+        generate(tmp_path, workers=2, progress=None)
+    assert isinstance(failure.value.__cause__, BrokenProcessPool)
+    assert not (tmp_path / "_SUCCESS.json").exists()
+
+
 def _hold_shared_lease(root, connection):
     with dataset_lock(root, generating=True):
         connection.send("locked")
@@ -380,6 +745,78 @@ def test_remaining_boolean_api_arguments_are_not_truthiness_checks(release, oper
                 pass
 
 
+@pytest.mark.parametrize(
+    "relative",
+    ["/etc/passwd", "../escape.json", "data/../../escape.json", "data/logged/../../.."],
+)
+def test_dataset_paths_cannot_escape_the_release_directory(tmp_path, relative):
+    # "/etc/passwd" is the cross-platform case: Windows reports it as not
+    # absolute because it carries no drive, yet joining it resets to the drive
+    # root, so a guard written on is_absolute() alone lets it out of the release.
+    from thermoshift.filesystem import dataset_path
+
+    with pytest.raises(ValueError, match="must be relative to the dataset directory"):
+        dataset_path(tmp_path, relative)
+
+
+def test_junctions_are_refused_like_symlinks(tmp_path, monkeypatch):
+    # A Windows junction redirects like a symlink but is_symlink() does not
+    # report one, so the guard asks os.path.isjunction as well. That returns
+    # False off Windows, so drive the detector directly to prove the wiring:
+    # no CI platform here can create a junction.
+    from thermoshift import filesystem
+
+    target = tmp_path / "data" / "logged"
+    target.mkdir(parents=True)
+    assert filesystem.dataset_path(tmp_path, "data/logged").is_dir()
+
+    monkeypatch.setattr(filesystem, "_isjunction", lambda path: Path(path) == target)
+    with pytest.raises(ValueError, match="symlinks and junctions are not allowed"):
+        filesystem.dataset_path(tmp_path, "data/logged/train/part-0.parquet")
+    # Siblings of the junction stay usable.
+    assert filesystem.dataset_path(tmp_path, "data/oracle").name == "oracle"
+
+
+def test_initialization_removes_a_stale_config_temporary_but_not_foreign_files(tmp_path):
+    # A process can die between mkstemp and the atomic rename of run_config.json.
+    stale = tmp_path / "run_config.json.tmp-abcdef"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"partial write")
+    initialize(tmp_path, Config(rows=24, episode_steps=8))
+    assert not stale.exists() and (tmp_path / "run_config.json").is_file()
+
+    other = tmp_path.parent / "second"
+    other.mkdir()
+    (other / "unrelated.txt").write_text("someone else owns this directory")
+    with pytest.raises(ValueError, match="must be empty"):
+        initialize(other, Config(rows=24, episode_steps=8))
+    assert (other / "unrelated.txt").is_file()
+    assert not (other / "run_config.json").exists()
+
+
+@pytest.mark.parametrize(
+    "repo_id,revision,message",
+    [
+        # The SDK accepts a bare name; a release still needs its namespace.
+        ("justaname", "main", "OWNER/DATASET"),
+        ("owner/set", "", "existing branch"),
+        ("owner/set", "   ", "existing branch"),
+        ("owner/set", None, "existing branch"),
+    ],
+)
+def test_publication_targets_are_checked_before_any_validation(
+    tmp_path, monkeypatch, repo_id, revision, message
+):
+    from thermoshift import validation
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("validation should not run for an invalid publication target")
+
+    monkeypatch.setattr(validation, "_validate_locked", forbidden)
+    with pytest.raises(ValueError, match=message):
+        publish(tmp_path / "does-not-exist", repo_id, revision=revision)
+
+
 def test_initialization_type_error_precedes_filesystem_mutation(tmp_path):
     root = tmp_path / "new-directory"
     with pytest.raises(TypeError, match="Config"):
@@ -427,7 +864,9 @@ def test_generation_rejects_symlinked_locks(release, relative):
     assert external.read_bytes() == b"preserve this lock"
 
 
-@pytest.mark.parametrize("failure", ["extra_file", "symlink", "incomplete_shard", "card_write"])
+@pytest.mark.parametrize(
+    "failure", ["extra_file", "symlink", "state_symlink", "incomplete_shard", "card_write"]
+)
 def test_failed_refinalization_clears_old_completion_and_validation(release, monkeypatch, failure):
     from thermoshift import storage
 
@@ -436,6 +875,13 @@ def test_failed_refinalization_clears_old_completion_and_validation(release, mon
         (release / "data/extra.parquet").write_bytes(b"unexpected")
     elif failure == "symlink":
         (release / "data/redirect").symlink_to(release / "_state", target_is_directory=True)
+    elif failure == "state_symlink":
+        # A redirected shard record must be named as such, not reported as an
+        # unrelated incomplete shard.
+        record = release / "_state/shard-00000000.json"
+        moved = release / "redirected-state.json"
+        record.rename(moved)
+        record.symlink_to(moved)
     elif failure == "incomplete_shard":
         (release / "_state/shard-00000000.json").unlink()
     else:
@@ -444,7 +890,8 @@ def test_failed_refinalization_clears_old_completion_and_validation(release, mon
             raise ValueError("injected card write failure")
 
         monkeypatch.setattr(storage, "write_card", fail_card)
-    with pytest.raises(ValueError):
+    expected = "symlinks are not allowed under _state/" if failure == "state_symlink" else None
+    with pytest.raises(ValueError, match=expected):
         finalize(release)
     assert not (release / "_SUCCESS.json").exists()
     assert not (release / "validation.json").exists()
@@ -506,7 +953,10 @@ def test_schema_repair_flag_requires_a_boolean(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("field", ["shard_id", "file.shard_id", "file.rows", "file.sha256"])
+@pytest.mark.parametrize(
+    "field",
+    ["shard_id", "file.shard_id", "file.rows", "file.sha256", "files_not_a_list", "files_short"],
+)
 def test_malformed_shard_state_is_never_resumed(release, field):
     path = release / "_state/shard-00000000.json"
     state = read_json(path)
@@ -516,6 +966,10 @@ def test_malformed_shard_state_is_never_resumed(release, field):
         state["files"][0]["shard_id"] = False
     elif field == "file.rows":
         state["files"][0]["rows"] = float(state["files"][0]["rows"])
+    elif field == "files_not_a_list":
+        state["files"] = {f["path"]: f for f in state["files"]}
+    elif field == "files_short":
+        state["files"] = state["files"][:-1]
     else:
         del state["files"][0]["sha256"]
     atomic_json(path, state)

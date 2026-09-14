@@ -79,7 +79,7 @@ release binding. Parent-commit checks protect publication steps from branch chan
 | --- | --- |
 | `src/thermoshift/` | Installable package |
 | `examples/` | Small clients for loading, prediction and policy evaluation |
-| `tests/` | Scientific, integrity, recovery, publication and CLI tests |
+| `tests/` | Scientific, reproducibility, integrity, recovery, publication and CLI tests |
 | `docs/` | Operations and API guides plus the column reference |
 | `notebooks/` | Executed sample walkthrough |
 | `scripts/` | Documentation, notebook and distribution checks |

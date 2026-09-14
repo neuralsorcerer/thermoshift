@@ -8,6 +8,9 @@ are supported when a workflow needs more control or analysis. Names beginning
 with `_`, and helpers listed as internal at the end of this page, are not stable
 application interfaces.
 
+Every package export is annotated and the distribution ships a PEP 561 marker,
+so type checkers resolve these signatures in your own code without stubs.
+
 ## Package exports
 
 ```python
@@ -54,12 +57,13 @@ Config(
 | `schema_version` | Currently only `"2.0"`. |
 
 Booleans are not accepted as integers, and numeric strings are not coerced.
-Invalid values raise `ValueError`. Derived properties are `buildings` (the
-ceiling of `rows / episode_steps`), `shards` (the ceiling of
-`buildings / shard_buildings`), and `fingerprint` (the SHA-256 fingerprint of
-the serialized configuration). `bounds(shard_id)` returns the half-open
-`(start_building, stop_building)` range for a shard and raises `ValueError` for
-an invalid shard ID.
+NumPy scalars are rejected too, so pass plain Python numbers; only exact Python
+values fingerprint and serialize reproducibly. Invalid values raise `ValueError`
+naming the rejected type. Derived properties are `buildings` (the ceiling of
+`rows / episode_steps`), `shards` (the ceiling of `buildings / shard_buildings`),
+and `fingerprint` (the SHA-256 fingerprint of the serialized configuration).
+`bounds(shard_id)` returns the half-open `(start_building, stop_building)` range
+for a shard and raises `ValueError` for an invalid shard ID.
 
 ```python
 from thermoshift import Config
@@ -268,6 +272,14 @@ scores = train_baseline("output/demo", max_train=100_000, max_eval=100_000)
 print(scores["splits"].get("test"))
 ```
 
+### `read_bounded(root, split, limit) -> pandas.DataFrame | None`
+
+Also requires the `analysis` extra. It verifies the release under an exclusive
+lease, then returns at most `limit` leading rows of one split as a pandas frame
+containing the policy features plus `action` and `y_next_temp_c`, or `None` when
+the split has no files. `limit` must be a positive integer and `split` must name
+a configured split; both raise `ValueError` otherwise.
+
 `ClusterMoments` is the streaming building-cluster accumulator used by policy
 evaluation. It accepts ordered `(n, 6)` value batches with `add(ids, values)`,
 requires `flush()` before `ratio(numerator, denominator)`, and supports ratio
@@ -345,6 +357,7 @@ The following importable helpers support package internals and tests but are not
 stable user APIs: `config.integer`, `config.boolean`; filesystem atomic-write,
 hash, and JSON helpers; provenance fingerprint/loading helpers; random stream
 helpers; shard path/state helpers; lifecycle locking; generated-card writing;
-and `reading.ordered_files`. Prefer the package exports and documented module
-APIs above. Private names such as `_validated_manifest`, `_iter_pairs`,
-`_read_bounded`, and `_run_locked` are implementation details.
+`reading.ordered_files`, and the baseline's `matrix` feature builder. Prefer the
+package exports and documented module APIs above. Private names such as
+`_validated_manifest`, `_iter_pairs`, `_read_bounded`, and `_run_locked` are
+implementation details.

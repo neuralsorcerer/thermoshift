@@ -74,9 +74,17 @@ def main() -> None:
         metadata_path = next(
             name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
         )
+        # The PEP 561 marker is useless unless it ships beside the package.
+        assert "thermoshift/py.typed" in archive.namelist(), "Wheel is missing py.typed"
         metadata = BytesParser().parsebytes(archive.read(metadata_path))
         assert metadata["Name"] == "thermoshift"
         assert metadata["Version"] == __version__
+        assert metadata.get_all("Project-URL"), "Wheel metadata declares no project URLs"
+        classifiers = metadata.get_all("Classifier") or []
+        assert "Typing :: Typed" in classifiers
+        # PEP 639 forbids License classifiers beside a license expression.
+        assert metadata["License-Expression"] == "MIT"
+        assert not [c for c in classifiers if c.startswith("License ::")]
         entrypoints = next(
             name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt")
         )
@@ -115,6 +123,10 @@ def main() -> None:
             "MANIFEST.in",
             "LICENSE",
             "docs/requirements.txt",
+            # CONTRIBUTING ships in the archive and tells the reader to run
+            # pre-commit, so its configuration has to travel with it.
+            ".pre-commit-config.yaml",
+            "src/thermoshift/py.typed",
         ):
             assert archive.extractfile(f"{prefix}/{name}").read() == (ROOT / name).read_bytes()
 

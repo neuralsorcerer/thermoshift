@@ -83,6 +83,24 @@ def _trajectory(
     for name in ("conductance_kw_per_c", "capacity_kwh_per_c"):
         v = array(joined_o, name)
         require(v[1:][same] == v[:-1][same], f"building parameter changed: {name}")
+    # Solar gain is the irradiance scaled by a constant per-building aperture, so
+    # the cross-multiplied ratio cannot move within a trajectory. This is the one
+    # check that ties stored irradiance to stored solar heat.
+    irradiance = array(joined_x, "solar_w_m2").astype(float)
+    solar_heat = array(joined_o, "solar_heat_kw").astype(float)
+    close(
+        (solar_heat[1:] * irradiance[:-1])[same],
+        (solar_heat[:-1] * irradiance[1:])[same],
+        "solar aperture changed within a trajectory",
+    )
+    # Sensor bias is affine in the step index, so its second difference vanishes.
+    drift = np.diff(array(joined_o, "sensor_bias_c").astype(float))
+    consecutive = same[1:] & same[:-1]
+    close(
+        drift[1:][consecutive],
+        drift[:-1][consecutive],
+        "sensor bias is not linear in the step index",
+    )
     days = array(joined_x, "day_of_week").astype(int)
     new_day = array(joined_x, "hour")[1:] == 0
     require(days[1:][same] == ((days[:-1] + new_day) % 7)[same], "weekday progression fails")
@@ -175,6 +193,80 @@ def _domains(x: pa.Table, o: pa.Table) -> None:
         require(array(o, name) >= 0, f"negative {name}")
     require(array(x, "occupancy_count") >= 0, "negative occupancy")
     require(array(x, "solar_w_m2") >= 0, "negative irradiance")
+    # Irradiance follows the documented daylight schedule: exactly zero whenever
+    # the daylight sine vanishes, and between 550 and 900 W/m2 per unit sine
+    # otherwise. Bounds are relative so they hold at the tiny dusk sine too.
+    hour = array(x, "hour").astype(float)
+    shape = np.where(
+        (hour >= 6) & (hour <= 18), np.maximum(0.0, np.sin(np.pi * (hour - 6) / 12)), 0.0
+    )
+    irradiance = array(x, "solar_w_m2").astype(float)
+    dark = shape == 0
+    require(irradiance[dark] == 0, "nonzero irradiance outside daylight hours")
+    lit = ~dark
+    require(
+        (irradiance[lit] >= 550 * shape[lit] * (1 - 1e-6))
+        & (irradiance[lit] <= 900 * shape[lit] * (1 + 1e-6)),
+        "irradiance outside its daylight envelope",
+    )
+    _distributions(
+        x, o, area=array(x, "floor_area_m2").astype(float), irradiance=irradiance, lit=lit
+    )
+
+
+def _within(values, low, high, message):
+    """Bound a documented open interval, with room for float32 serialization."""
+    require((values > low * (1 - 1e-6)) & (values < high * (1 + 1e-6)), message)
+
+
+def _distributions(x: pa.Table, o: pa.Table, area, irradiance, lit) -> None:
+    """Check the per-building draws the model reference documents.
+
+    These are the only checks that look at where a parameter came from rather
+    than how the stored columns relate. Every equation elsewhere is satisfied by
+    a release generated from a different set of distributions, so without these
+    a changed building population validates cleanly.
+    """
+    _within(area, 50, 300, "floor area outside its documented range")
+    _within(array(x, "setpoint_c").astype(float), 23, 25, "setpoint outside its documented range")
+    for name, table, low, high in (
+        ("conductance_kw_per_c", o, 0.0025 * 0.65, 0.0025 * 1.35),
+        ("capacity_kwh_per_c", o, 0.040 * 0.70, 0.040 * 1.30),
+        ("hvac_capacity_kw", x, 0.025 * 0.80, 0.025 * 1.20),
+        ("base_load_kw", o, 0.003 * 0.35, 0.003 * 1.00),
+    ):
+        _within(
+            array(table, name).astype(float) / area,
+            low,
+            high,
+            f"{name} outside its documented share of floor area",
+        )
+    if lit.any():
+        # Solar heat is irradiance/1000 times the aperture, so the aperture is
+        # recoverable wherever the sun is up.
+        aperture = array(o, "solar_heat_kw").astype(float)[lit] * 1000 / irradiance[lit]
+        _within(
+            aperture / area[lit], 0.035, 0.100, "solar aperture outside its share of floor area"
+        )
+    # Occupancy is a draw from the building's capacity, or zero.
+    require(
+        array(x, "occupancy_count") <= 1 + np.floor(area / 35 + 1e-6),
+        "occupancy above the building's capacity",
+    )
+    # Actual COP is the nominal draw reduced by 0.045 per degree above 25, then
+    # clipped and, in the heatwave split, scaled by 0.85. Dividing by that scale
+    # on one side and not the other brackets the nominal draw without needing to
+    # know which split the row came from.
+    excess = np.maximum(array(x, "outdoor_temp_c").astype(float) - 25, 0)
+    cop = array(o, "cop").astype(float)
+    require(
+        cop / 0.85 + 0.045 * excess > 3.2 * (1 - 1e-6),
+        "coefficient of performance below its nominal range",
+    )
+    require(
+        cop + 0.045 * excess < 4.0 * (1 + 1e-6),
+        "coefficient of performance above its nominal range",
+    )
 
 
 def _outcomes(config: Config, x: pa.Table, o: pa.Table) -> None:
@@ -328,6 +420,9 @@ def scan_records(root: Path, config: Config, manifest: dict, batch_size: int) ->
         "thermal/electrical balance",
         "cost/carbon/reward equations",
         "cooling monotonicity",
+        "daylight irradiance envelope",
+        "documented building parameter distributions",
+        "constant solar aperture and linear sensor drift",
         "sensor missingness and fault labels",
         "oracle one-step optimality",
     ]

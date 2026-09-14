@@ -74,10 +74,11 @@ def _run_locked(root, max_train, max_eval):
     model = HistGradientBoostingRegressor(
         max_iter=120, max_leaf_nodes=31, learning_rate=0.08, early_stopping=False, random_state=42
     )
-    model.fit(matrix(train), train["y_next_temp_c"])
+    design = matrix(train)
+    model.fit(design, train["y_next_temp_c"])
     results = {
         "training_rows": len(train),
-        "features": list(matrix(train).columns),
+        "features": list(design.columns),
         "oracle_used_for_training": False,
         "splits": {},
     }

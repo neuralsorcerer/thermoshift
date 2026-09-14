@@ -34,10 +34,19 @@ SOURCE_ROOT = Path(__file__).parent
 def source_digest() -> str:
     """Fingerprint package code and dataset templates in a stable path order."""
     digest = hashlib.sha256()
-    sources = sorted(path for path in SOURCE_ROOT.rglob("*") if path.suffix in {".py", ".md"})
-    for path in sources:
-        digest.update(path.relative_to(SOURCE_ROOT).as_posix().encode("utf-8") + b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    # Order by the name that is hashed, not by Path: comparing Path objects folds
+    # case on Windows and does not on POSIX, so one uppercase name at the top
+    # level would fingerprint the same sources differently per platform. Today
+    # every such name sits under resources/ and both orders agree, which is why
+    # this keeps the digest of existing releases unchanged.
+    sources = {
+        path.relative_to(SOURCE_ROOT).as_posix(): path
+        for path in SOURCE_ROOT.rglob("*")
+        if path.suffix in {".py", ".md"}
+    }
+    for name in sorted(sources):
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(sources[name].read_bytes()).digest())
     return digest.hexdigest()
 
 

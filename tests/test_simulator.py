@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+from fractions import Fraction
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -71,14 +73,33 @@ def test_thermal_solution_handles_overflowing_rate():
     assert result == pytest.approx(33.0)
 
 
-def test_thermal_solution_recovers_representable_result_after_intermediate_overflow():
+def test_thermal_solution_keeps_opposing_extreme_terms_representable():
+    # Both differences overflow float64 on their own, yet every scaled term and
+    # the final sum are representable, so the factored float64 path finishes.
+    # Expectations are exact rationals: a platform whose longdouble is only as
+    # wide as float64 cannot evaluate the unfactored form as a reference.
     result = thermal_step(1e308, -1e308, 1, 1, -1e308, 1e308)
-    alpha = -np.expm1(np.longdouble(-1))
-    expected = (
-        np.longdouble(1e308)
-        + alpha * (np.longdouble(-1e308) - np.longdouble(1e308))
-        + (np.longdouble(-1e308) - np.longdouble(1e308)) * alpha
-    )
+    alpha = Fraction(float(-np.expm1(-1.0)))
+    # With conductance = capacity = 1 the solution is
+    # (1 - alpha) * temp + alpha * outdoor + (heat - cooling) * alpha, and here
+    # temp = +1e308, outdoor = -1e308, heat = -1e308 and cooling = +1e308.
+    expected = Fraction(1e308) * ((1 - alpha) - alpha - 2 * alpha)
+    assert np.isfinite(result)
+    assert result == pytest.approx(float(expected))
+
+
+def test_thermal_solution_recovers_representable_result_after_intermediate_overflow():
+    # A heat response far above one overflows each separate forcing product
+    # while their difference stays representable. The extended-precision retry
+    # subtracts first, so it recovers the result even where longdouble is only
+    # as wide as float64.
+    conductance = capacity = 1e-9
+    heat, cooling = 1e301, 1e301 - 1e290
+    response = Fraction(float(-np.expm1(-1.0))) / Fraction(conductance)
+    with np.errstate(over="ignore"):
+        assert not np.isfinite(np.float64(heat) * float(response))
+    result = thermal_step(0.0, 0.0, conductance, capacity, heat, cooling)
+    expected = (Fraction(heat) - Fraction(cooling)) * response
     assert result == pytest.approx(float(expected))
 
 
@@ -143,12 +164,33 @@ def test_split_assignment_is_disjoint_and_stable():
         {"comfort_weight": float("nan")},
         {"shard_buildings": 0},
         {"compression": "none"},
+        {"compression_level": 0},
+        {"compression_level": 20},
+        {"comfort_weight": 1e6},
+        {"carbon_weight": 1e6},
+        {"comfort_weight": -1.0},
         {"hidden_confounding": 1},
     ],
 )
 def test_invalid_configuration_rejected(kwargs):
     with pytest.raises(ValueError):
         Config(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field,value,rejected",
+    [
+        ("exploration", np.float64(0.15), "float64"),
+        ("comfort_weight", np.float32(0.3), "float32"),
+        ("rows", np.int64(1000), "int64"),
+        ("seed", np.int32(42), "int32"),
+    ],
+)
+def test_numpy_scalars_are_rejected_by_name(field, value, rejected):
+    # NumPy is a core dependency, so a NumPy scalar is the likeliest mistake
+    # here. It cannot be fingerprinted, and the error must say which type came in.
+    with pytest.raises(ValueError, match=rejected):
+        Config(**{field: value})
 
 
 @pytest.mark.parametrize("field,value", [("compression", "zstd"), ("schema_version", "2.0")])

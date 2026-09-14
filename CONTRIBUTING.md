@@ -21,7 +21,7 @@ python scripts/update_schema.py --check
 python -m pytest
 ```
 
-The development extra also installs pre-commit. Run the fast, file-aware checks
+The `dev` extra also installs pre-commit. Run the fast, file-aware checks
 across the repository before committing:
 
 ```bash
@@ -35,8 +35,9 @@ commit hook.
 
 Tests cover configuration, physical equations, trajectory continuity, sampling,
 row coverage, file integrity, interruption recovery, process leases, policy
-statistics, CLI behavior, and publication. Publication tests use an in-memory
-service that enforces the installed SDK signatures and commit-parent semantics.
+statistics, the temperature baseline, CLI behavior, and publication. Publication
+tests use an in-memory service that enforces the installed SDK signatures and
+commit-parent semantics.
 
 When changing numeric logic, compare outcomes with an independent equation or
 reference calculation. Preserve the association between observed features, action
@@ -88,7 +89,7 @@ The workflows in [.github/workflows](.github/workflows) separate the checks:
 | `ubuntu.yml`, `macos.yml`, `windows.yml` | Python 3.11–3.14 tests, dependency consistency, wheel/source builds, installed-wheel generation and exact replay |
 | `lint.yml` | Ruff lint, import ordering, and formatting |
 | `docs.yml` | Strict Sphinx HTML build, generated schema reference, notebook execution with the bundled sample and a fresh 50,003-decision release, and GitHub Pages deployment from main |
-| `codeql.yml` | Python and GitHub Actions security analysis on main pushes/PRs and a weekly schedule |
+| `codeql.yml` | Python and GitHub Actions security analysis on pushes, pull requests, and a weekly schedule |
 
 Every workflow supports manual dispatch. Test workflows retain JUnit reports for
 14 days; documentation checks retain the executed notebook and validation report.

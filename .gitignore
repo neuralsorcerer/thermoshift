@@ -49,7 +49,8 @@ dist/
 
 # Generated local datasets and command output
 output/
-*.parquet.tmp
+*.inprogress
+*.tmp-*
 
 # Jupyter and notebook runtime files
 .ipynb_checkpoints/
@@ -85,5 +86,3 @@ ehthumbs.db
 reports/
 sample_dataset/*.lock
 sample_dataset/_state/*.lock
-sample_dataset/**/*.inprogress
-sample_dataset/**/*.tmp-*

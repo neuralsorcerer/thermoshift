@@ -30,8 +30,8 @@ penalty. A paired oracle table supplies latent state and potential outcomes for
 all three cooling actions.
 
 The Python package and CLI write sharded Parquet releases with deterministic
-building splits, resumable generation, checksums, validation reports. Run it locally or as a batch job; multi-machine generation
-uses a shared filesystem.
+building splits, resumable generation, checksums, and validation reports. Run it
+locally or as a batch job; multi-machine generation uses a shared filesystem.
 
 
 ## Capabilities and scope
@@ -537,7 +537,8 @@ validation and cannot be combined with `--metadata-only`. Exact replay adds work
 proportional to regenerating the release, one building at a time.
 
 Full validation checks IDs, split membership, trajectory and sensor continuity,
-logging probabilities, factual/oracle alignment, physical domains, thermal and
+logging probabilities, factual/oracle alignment, physical domains, the documented
+building parameter distributions, the daylight irradiance envelope, thermal and
 electrical equations, reward accounting, cooling monotonicity, and oracle labels.
 Reports use `running`, `passed`, `failed`, or `interrupted` status and record the
 check scope. A killed process can leave `running`; rerun validation to refresh it.
@@ -557,6 +558,7 @@ use. Publication performs a fresh full local validation regardless of a saved re
 | Output contains a different configuration / new output must be empty | Initialize a new empty directory with the intended parameters. |
 | Generator code/runtime differs from initialization | Restore the recorded source and exact runtime, or start a new release directory. |
 | `dataset is busy` | Finish active operations and exhaust or close paired iterators before retrying. |
+| `The file lock ... could not be acquired` | Another generation process already owns that shard. Give each concurrent job a distinct `--rank`, or wait for the other run to finish and resume; completed shards are kept. |
 | Shard is incomplete during finalization | Complete all ranks, then run `finalize` and full validation. |
 | Parquet checksum fails | Resume generation in the original environment to rebuild the affected shard, then validate. |
 | Release metadata checksum fails | Restore the original bound metadata; do not hand-edit a finalized card, schema, or manifest. |
@@ -572,15 +574,23 @@ Install all development and example dependencies, then run the repository checks
 ```bash
 python -m pip install -e ".[dev,hub,analysis,notebook]"
 python -m pip check
-python -m ruff check src tests examples scripts benchmarks
-python -m ruff format --check src tests examples scripts benchmarks
+python -m ruff check src tests examples scripts benchmarks docs
+python -m ruff format --check src tests examples scripts benchmarks docs
 python scripts/update_schema.py --check
 python -m pytest -q
 ```
 
+The `dev` extra also installs pre-commit, which runs the same file-aware lint and
+formatting checks across the repository:
+
+```bash
+python -m pre_commit run --all-files
+```
+
 Tests cover independent thermal calculations, deterministic batching, int64 row
 boundaries, split isolation, corrupted records and files, interruption recovery,
-process leases, policy uncertainty, CLI behavior, notebook failures, and publication.
+process leases, policy uncertainty, the temperature baseline, CLI behavior,
+notebook failures, and publication.
 Publication tests use an in-memory Hub service that checks installed SDK signatures
 and commit-parent semantics; they do not certify live account permissions or quotas.
 

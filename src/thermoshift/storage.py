@@ -14,6 +14,7 @@ import os
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
@@ -116,14 +117,16 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
                 for low in range(start, stop, batch_buildings):
                     logged, oracle, codes = simulate(config, low, min(low + batch_buildings, stop))
                     for split_id, split in enumerate(SPLITS):
-                        mask = pa.array(codes == split_id)
-                        if not np.any(codes == split_id):
+                        selected = codes == split_id
+                        if not np.any(selected):
                             continue
+                        mask = pa.array(selected)
                         for kind, table in (("logged", logged), ("oracle", oracle)):
                             relative = shard_path(kind, split, shard_id)
                             if relative not in writers:
-                                final = dataset_path(root, relative)
-                                final.parent.mkdir(parents=True, exist_ok=True)
+                                dataset_path(root, relative).parent.mkdir(
+                                    parents=True, exist_ok=True
+                                )
                                 temporary = dataset_path(
                                     root, Path(relative).with_suffix(".parquet.inprogress")
                                 )
@@ -150,8 +153,10 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
             for relative, temporary in sorted(temp_paths.items()):
                 with temporary.open("r+b") as handle:
                     os.fsync(handle.fileno())
-                os.replace(temporary, root / relative)
-                final = root / relative
+                # Re-resolve the destination: nothing guarantees a path stayed
+                # symlink-free between opening the temporary and committing it.
+                final = dataset_path(root, relative)
+                os.replace(temporary, final)
                 fsync_directory(final.parent)
                 files.append(
                     {
@@ -228,33 +233,43 @@ def _generate_locked(root, config, workers, batch_buildings, rank, world_size, p
         for sid in shard_ids:
             record(_generate_shard(str(root), asdict(config), sid, batch_buildings))
     else:
-        # At most 2*workers tasks queued; no billion-element future or row list.
-        with ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=multiprocessing.get_context("spawn"),
-            initializer=_worker_initialize,
-        ) as pool:
-            pending = set()
+        try:
+            # At most 2*workers tasks queued; no billion-element future or row list.
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_worker_initialize,
+            ) as pool:
+                pending = set()
 
-            def submit_next():
-                sid = next(shard_ids, None)
-                if sid is not None:
-                    pending.add(
-                        pool.submit(
-                            _generate_shard, str(root), asdict(config), sid, batch_buildings
+                def submit_next():
+                    sid = next(shard_ids, None)
+                    if sid is not None:
+                        pending.add(
+                            pool.submit(
+                                _generate_shard, str(root), asdict(config), sid, batch_buildings
+                            )
                         )
-                    )
-                    return True
-                return False
+                        return True
+                    return False
 
-            for _ in range(2 * workers):
-                if not submit_next():
-                    break
-            while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    record(future.result())
-                    submit_next()
+                for _ in range(2 * workers):
+                    if not submit_next():
+                        break
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        record(future.result())
+                        submit_next()
+        except BrokenProcessPool as error:
+            # A worker that raises reports its own exception through the future.
+            # Reaching here means one died without reporting anything, so name
+            # the usual cause and the remedy instead of an opaque pool failure.
+            raise OSError(
+                "a generation worker exited without reporting an error, which usually means "
+                "the operating system stopped it for memory use; reduce workers or "
+                "batch_buildings and run generation again to resume completed shards"
+            ) from error
     summary["seconds"] = time.perf_counter() - started
     return summary
 
@@ -272,7 +287,10 @@ def finalize(root: str | Path) -> dict[str, Any]:
         data = dataset_path(root, "data")
         if any(path.is_symlink() for path in data.rglob("*")):
             raise ValueError("symlinks are not allowed under data/")
-        dataset_path(root, "_state")
+        # Reject a redirected shard-state directory before trusting its records.
+        state = dataset_path(root, "_state")
+        if any(path.is_symlink() for path in state.glob("*")):
+            raise ValueError("symlinks are not allowed under _state/")
         files = []
         for sid in range(config.shards):
             if not shard_complete(root, config, sid, verify_hash=True):

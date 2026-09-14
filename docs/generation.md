@@ -65,6 +65,7 @@ consuming the release.
 | Finalization reports an incomplete shard | Finish all assigned generation ranks, then finalize |
 | Source or runtime differs from initialization | Restore that environment or initialize a new directory |
 | Dataset is busy | Finish or close the operation holding its dataset lease, then retry |
+| A shard lock cannot be acquired | Another generation process owns that shard; give each rank a distinct `--rank`, or wait and rerun |
 | Configuration has changed | Initialize a separate output directory |
 
 ## Run multiple ranks
@@ -109,10 +110,11 @@ python -m thermoshift validate output/experiment --replay
 python -m thermoshift validate output/experiment --no-report
 ```
 
-Full checks cover identity, split membership, trajectory continuity, sensor history,
-logging probabilities, factual/oracle alignment, thermal and electricity equations,
-reward accounting, and one-step action labels. Numeric equations are compared with
-serialization tolerances; copied values and identifiers are checked exactly.
+Full checks cover identity, split membership, trajectory continuity, sensor history
+and drift, logging probabilities, factual/oracle alignment, the building parameter
+distributions and daylight irradiance envelope documented in the model reference,
+thermal and electricity equations, reward accounting, and one-step action labels. Numeric equations are compared with serialization tolerances; copied values
+and identifiers are checked exactly.
 
 The saved report uses `running`, `passed`, `failed`, or `interrupted` status. Its
 scope identifies the checks performed. Replay requires the initialized generator

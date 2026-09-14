@@ -48,7 +48,9 @@ class Config:
     def __post_init__(self) -> None:
         for key in ("rows", "seed", "episode_steps", "shard_buildings", "compression_level"):
             if type(getattr(self, key)) is not int:
-                raise ValueError(f"{key} must be an integer")
+                raise ValueError(
+                    f"{key} must be a Python integer, not {type(getattr(self, key)).__name__}"
+                )
         if not 1 <= self.rows <= 2**63 - 1:
             raise ValueError("rows must fit a positive signed 64-bit integer")
         if not 0 <= self.seed < 2**32:
@@ -59,8 +61,12 @@ class Config:
             raise ValueError("shard_buildings must be in [1, 1000000]")
         for key in ("exploration", "comfort_weight", "carbon_weight"):
             value = getattr(self, key)
+            # Booleans, strings and NumPy scalars are all rejected here: only
+            # exact Python numbers fingerprint and serialize reproducibly.
             if type(value) not in (int, float):
-                raise ValueError(f"{key} must be a finite real number, not a boolean")
+                raise ValueError(
+                    f"{key} must be a finite Python int or float, not {type(value).__name__}"
+                )
             try:
                 value = float(value)
             except OverflowError as error:

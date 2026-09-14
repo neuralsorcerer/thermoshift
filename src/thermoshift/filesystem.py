@@ -16,9 +16,20 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# os.path.isjunction arrived in Python 3.12 and is always False away from
+# Windows. A junction redirects like a symlink, but is_symlink() does not report
+# one, so without this a release on Windows would write straight through it.
+# Python 3.11 on Windows has no way to ask, and keeps the older behavior.
+_isjunction = getattr(os.path, "isjunction", None)
+
+
+def _redirects(path: Path) -> bool:
+    """Report a symlink, or on Windows a junction, at this exact path."""
+    return path.is_symlink() or (_isjunction is not None and _isjunction(path))
+
 
 def dataset_path(root: str | Path, relative: str | Path) -> Path:
-    """Resolve an internal dataset path without following symlink components.
+    """Resolve an internal dataset path without following redirected components.
 
     The dataset root itself may be a caller-selected symlink. Paths within it
     must stay local so generation cannot write through a redirected partition,
@@ -26,13 +37,16 @@ def dataset_path(root: str | Path, relative: str | Path) -> Path:
     unrelated programs must still leave active dataset paths unchanged.
     """
     relative = Path(relative)
-    if relative.is_absolute() or ".." in relative.parts:
+    # Reject on the anchor rather than is_absolute(): on Windows "/data" carries
+    # no drive and is not absolute, yet joining it resets to the drive root and
+    # leaves the release entirely. "C:data" is drive-relative the same way.
+    if relative.anchor or ".." in relative.parts:
         raise ValueError("dataset paths must be relative to the dataset directory")
     path = Path(root)
     for part in relative.parts:
         path /= part
-        if path.is_symlink():
-            raise ValueError(f"symlinks are not allowed in dataset paths: {relative}")
+        if _redirects(path):
+            raise ValueError(f"symlinks and junctions are not allowed in dataset paths: {relative}")
     return path
 
 
