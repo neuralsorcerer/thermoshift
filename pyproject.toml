@@ -27,7 +27,7 @@ classifiers = [
 dependencies = [
     "numpy>=2.0,<3",
     "pyarrow>=19,<26",
-    "filelock>=3.16,<4",
+    "filelock>=3.16,<5",
     "portalocker>=3.2,<4",
     "PyYAML>=6,<7",
 ]
