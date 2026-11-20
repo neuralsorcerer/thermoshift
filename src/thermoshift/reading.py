@@ -17,11 +17,12 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from thermoshift._checks import require
+from thermoshift._checks import array, require
 from thermoshift.config import SPLITS, Config, boolean, integer
-from thermoshift.filesystem import dataset_path, read_json, sha256
+from thermoshift.filesystem import dataset_parquet_paths, dataset_path, read_json, sha256
 from thermoshift.lifecycle import dataset_lock
 from thermoshift.provenance import check_schema_documents, load_config, metadata_hashes
+from thermoshift.random import split_codes
 from thermoshift.schema import SCHEMAS
 from thermoshift.shards import expected_shard, shard_path
 
@@ -81,6 +82,8 @@ def _validated_manifest(root, verify_hash=True):
     )
     for count in split_rows.values():
         integer(count, "split row count", 0)
+    # Every shard has at least one nonempty split, with both configurations.
+    require(len(files) >= len(SCHEMAS) * config.shards, "manifest file count mismatch")
     expected = {}
     for sid in range(config.shards):
         expected.update(expected_shard(config, sid))
@@ -88,17 +91,12 @@ def _validated_manifest(root, verify_hash=True):
         files == sorted(files, key=lambda f: f["path"]),
         "manifest files must have canonical path order",
     )
-    require(
-        not (root / "data").is_symlink()
-        and not any(p.is_symlink() for p in (root / "data").rglob("*")),
-        "symlinks are not allowed under data/",
-    )
     require(len(files) == len(expected), "manifest file count mismatch")
     require(
         {f["path"]: f["rows"] for f in files} == expected,
         "manifest does not cover the configured rows",
     )
-    actual = {p.relative_to(root).as_posix() for p in (root / "data").rglob("*.parquet")}
+    actual = dataset_parquet_paths(root)
     require(actual == set(expected), "unexpected/missing Parquet file")
     require(manifest["buildings"] == config.buildings, "total building count mismatch")
     require(manifest["rows"] == config.rows, "total row count mismatch")
@@ -133,10 +131,10 @@ def iter_pairs(
     the iterator to release its exclusive lifecycle lease.
     """
     integer(batch_size, "batch_size", 1)
-    require(split is None or split in SPLITS, "unknown split")
+    require(split is None or (isinstance(split, str) and split in SPLITS), "unknown split")
     with dataset_lock(root):
-        _, manifest = _validated_manifest(root)
-        yield from _iter_pairs(root, manifest, split, batch_size)
+        config, manifest = _validated_manifest(root)
+        yield from _iter_pairs(root, manifest, split, batch_size, config=config)
 
 
 def ordered_files(
@@ -153,7 +151,32 @@ def ordered_files(
     )
 
 
-def _iter_pairs(root, manifest, split=None, batch_size=65_536):
+def check_row_identifiers(
+    config: Config,
+    item: dict[str, Any],
+    table: pa.Table | pa.RecordBatch,
+    previous_row_id: int | None = None,
+) -> int:
+    """Check the identity, ordering and split membership of a nonempty batch."""
+    for name in ("row_id", "building_id", "step"):
+        require(table[name].null_count == 0, f"unexpected null: {name}")
+    rid, bid, step = (array(table, name) for name in ("row_id", "building_id", "step"))
+    low, high = config.bounds(item["shard_id"])
+    require((bid >= low) & (bid < high), "building outside shard interval")
+    require((rid >= 0) & (rid < config.rows), "row ID out of bounds")
+    require((step >= 0) & (step < config.episode_steps), "invalid step")
+    require(rid - bid * config.episode_steps == step, "row ID equation fails")
+    require(rid[1:] > rid[:-1], "duplicate or unsorted row ID")
+    if previous_row_id is not None:
+        require(rid[0] > previous_row_id, "duplicate or unsorted row across batches")
+    require(
+        split_codes(bid, config.seed) == SPLITS.index(item["split"]),
+        "building leakage across splits",
+    )
+    return int(rid[-1])
+
+
+def _iter_pairs(root, manifest, split=None, batch_size=65_536, *, config=None):
     root = Path(root)
     for item in ordered_files(manifest, kind="logged", split=split):
         oracle_path = item["path"].replace("data/logged/", "data/oracle/", 1)
@@ -161,11 +184,21 @@ def _iter_pairs(root, manifest, split=None, batch_size=65_536):
             pq.ParquetFile(root / item["path"]) as logged,
             pq.ParquetFile(root / oracle_path) as oracle,
         ):
-            left = logged.iter_batches(batch_size=batch_size)
-            right = oracle.iter_batches(batch_size=batch_size)
+            expected_rows = logged.metadata.num_rows
+            require(expected_rows == oracle.metadata.num_rows, "paired file lengths differ")
+            rows_read = 0
+            previous_row_id = None
+            file_batch_size = min(batch_size, expected_rows)
+            left = logged.iter_batches(batch_size=file_batch_size)
+            right = oracle.iter_batches(batch_size=file_batch_size)
             for x, o in zip_longest(left, right):
                 require(x is not None and o is not None, "paired file lengths differ")
                 require(x.num_rows == o.num_rows, "paired batch lengths differ")
                 for name in ("row_id", "building_id", "step"):
                     require(x[name].equals(o[name]), "logged/oracle join mismatch")
+                if config is not None:
+                    previous_row_id = check_row_identifiers(config, item, x, previous_row_id)
+                rows_read += x.num_rows
+                require(rows_read <= expected_rows, "paired file row count mismatch")
                 yield item, pa.Table.from_batches([x]), pa.Table.from_batches([o])
+            require(rows_read == expected_rows, "paired file row count mismatch")

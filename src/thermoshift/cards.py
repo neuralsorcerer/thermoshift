@@ -24,6 +24,7 @@ def write_card(root: str | Path) -> None:
     root = Path(root)
     config = load_config(root)
     manifest = read_json(root / "manifest.json")
+    nonempty_splits = [split for split in SPLITS if manifest["split_rows"][split] > 0]
     front = {
         "pretty_name": "ThermoShift",
         "license": "mit",
@@ -50,12 +51,12 @@ def write_card(root: str | Path) -> None:
                 "default": kind == "logged",
                 "data_files": [
                     {"split": split, "path": f"data/{kind}/{split}/**/*.parquet"}
-                    for split in SPLITS
-                    if manifest["split_rows"][split] > 0
+                    for split in nonempty_splits
                 ],
             }
         )
     body = files("thermoshift").joinpath("resources/CARD.md").read_text(encoding="utf-8")
+    body = body.replace("{example_split}", nonempty_splits[0])
     summary = f"\n## This release\n\n{config.rows:,} unique hourly decision records from {config.buildings:,} synthetic buildings. "
     summary += "Each decision has a matching row in the logged and oracle configurations, linked by row_id.\n\n"
     summary += "| Split | Decision records |\n| --- | ---: |\n"

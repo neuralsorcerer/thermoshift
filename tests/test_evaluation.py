@@ -60,12 +60,7 @@ def test_large_offset_does_not_cancel_cluster_variance():
 
 
 def test_anchoring_survives_a_large_offset_with_uneven_denominators():
-    # Ratio (1, 0) cannot see this: its denominator is the row count, identical in
-    # every cluster, which zeroes the denominator row of the co-moment matrix and
-    # drops the correction term. SNIPS divides by summed weights, which differ per
-    # cluster, so the matrix has to cancel: anchored its entries are 7.1e7 against
-    # an answer needing 8.0e7, unanchored they reach 7.8e25 and must still land on
-    # 8.0e7, which float64 cannot do.
+    # Uneven weights leave a different large common-offset contribution in each building.
     rng = np.random.default_rng(7)
     clusters, per_cluster = 8, 5
     ids = np.repeat(np.arange(clusters), per_cluster)
@@ -92,9 +87,8 @@ def test_anchoring_survives_a_large_offset_with_uneven_denominators():
     def run(anchored):
         moments = evaluation.ClusterMoments()
         if not anchored:
-            # A non-NaN anchor is never replaced and reads as zero, so this is
-            # exactly the state the class would be in with the anchoring removed.
-            moments.anchor[:] = 0.0
+            # Disable anchor updates to leave every numerator unshifted.
+            moments.anchor_denominator[:] = np.inf
         for start, stop in ((0, 13), (13, 29), (29, n)):  # clusters split across chunks
             moments.add(ids[start:stop], values[start:stop])
         moments.flush()
@@ -107,12 +101,61 @@ def test_anchoring_survives_a_large_offset_with_uneven_denominators():
     anchored = run(anchored=True)
     assert anchored.ratio(1, 2)["se_building_cluster"] == pytest.approx(exact, rel=1e-5)
 
-    # Keep the fixture honest: a later edit must not shrink the offset and leave a
-    # test that cannot fail. Compare second moments rather than the standard errors
-    # they produce -- sums of squares are accurate on both sides, where an
-    # unanchored standard error is whatever an 18-digit cancellation leaves.
+    # The common offset should largely disappear from the numerator projection.
     j = evaluation.ClusterMoments.PAIRS.index((1, 2))
-    assert np.abs(run(anchored=False).m2[j]).max() > 1e15 * np.abs(anchored.m2[j]).max()
+    assert abs(run(anchored=False).projected_numerator[j]) > 1e10 * abs(
+        anchored.projected_numerator[j]
+    )
+
+
+def test_a_low_weight_anchor_preserves_cluster_variance():
+    weights = np.array([1e-20, 1.0, 2.0, 3.0])
+    rewards = np.array([0.0, 1e12 + 3, 1e12 - 7, 1e12 + 5])
+    values = np.column_stack(
+        [np.ones(4), weights * rewards, weights, rewards, rewards, np.zeros(4)]
+    )
+    moments = evaluation.ClusterMoments()
+    moments.add(np.arange(4), values)
+    moments.flush()
+
+    weighted = [Fraction(v) for v in values[:, 1]]
+    denominators = [Fraction(w) for w in weights]
+    estimate = sum(weighted) / sum(denominators)
+    residual_ss = sum((z - estimate * d) ** 2 for z, d in zip(weighted, denominators))
+    exact = math.sqrt(float(residual_ss * Fraction(4, 3) / sum(denominators) ** 2))
+    assert moments.ratio(1, 2)["se_building_cluster"] == pytest.approx(exact, rel=5e-5)
+
+
+def test_small_cluster_does_not_distort_ratio_for_dominant_clusters():
+    moments = evaluation.ClusterMoments()
+    moments.add(
+        np.arange(3),
+        np.array(
+            [
+                [1.0, -1e30, 1.0, -1e30, -1e30, 0.0],
+                [1.0, -1e30, 1e30, -1.0, -1.0, 0.0],
+                [1.0, -1e30, 1e30, -1.0, -1.0, 0.0],
+            ]
+        ),
+    )
+    moments.flush()
+    result = moments.ratio(1, 2)
+    assert result["value"] == pytest.approx(-1.5)
+    assert result["se_building_cluster"] == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize("buildings", [(0, 0, 0), (0, 1, 2)])
+@pytest.mark.parametrize("cut", [0, 1, 2])
+def test_signed_cancellation_preserves_small_rewards_across_batch_boundaries(buildings, cut):
+    ids = np.array(buildings)
+    rewards = np.array([1e16, 1.0, -1e16])
+    values = np.column_stack([np.ones(3), rewards, np.ones(3), rewards, rewards, np.zeros(3)])
+    moments = evaluation.ClusterMoments()
+    moments.add(ids[:cut], values[:cut])
+    moments.add(ids[cut:], values[cut:])
+    moments.flush()
+    for numerator, denominator in ((1, 0), (1, 2), (3, 0), (4, 0)):
+        assert moments.ratio(numerator, denominator)["value"] == pytest.approx(1 / 3)
 
 
 def test_cluster_order_and_empty_input():
@@ -124,6 +167,24 @@ def test_cluster_order_and_empty_input():
     m.flush()
     with pytest.raises(ValueError, match="reopen"):
         m.add(np.array([1]), np.ones((1, 6)))
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        np.full((1, 6), 1 + 2j),
+        np.full((1, 6), np.complex128(1 + 2j), dtype=object),
+        np.full((1, 6), 10**400, dtype=object),
+    ],
+)
+def test_cluster_rejects_values_outside_real_float64_before_updating(values):
+    moments = evaluation.ClusterMoments()
+    moments.add(np.array([0]), np.ones((1, 6)))
+    with pytest.raises(ValueError, match="representable as float64"):
+        moments.add(np.array([1]), values)
+    moments.flush()
+    assert moments.count == 1
+    assert moments.ratio(1, 0)["value"] == 1.0
 
 
 def test_flushing_without_a_pending_building_is_a_no_op():
@@ -187,6 +248,84 @@ def test_policy_estimates_match_direct_building_calculation(monkeypatch, policy_
     assert result["row_weight_ess_diagnostic"] == pytest.approx(
         weights.sum() ** 2 / (weights**2).sum()
     )
+
+
+@pytest.mark.parametrize("propensity", [1e-200, np.finfo(float).smallest_subnormal])
+def test_policy_handles_very_small_positive_propensities(monkeypatch, policy_tables, propensity):
+    logged, oracle = policy_tables
+    gap = logged["obs_temp_last_c"].to_numpy().astype(float) - logged[
+        "setpoint_c"
+    ].to_numpy().astype(float)
+    actions = np.where(gap > 1.5, 2, np.where(gap > -0.3, 1, 0))
+    first = np.flatnonzero(actions[:24] == logged["action"].to_numpy()[:24])[0]
+    logged, oracle = logged.take([first, 24]), oracle.take([first, 24])
+    selected = logged["action"][0].as_py()
+    for column in ("propensity", "p_action_0", "p_action_1", "p_action_2"):
+        value = propensity if column in ("propensity", f"p_action_{selected}") else 0.5
+        field = logged.schema.field(column)
+        logged = logged.set_column(
+            logged.schema.get_field_index(column),
+            field,
+            pa.array([value, logged[column][1].as_py()], type=field.type),
+        )
+
+    def batches(*args, **kwargs):
+        yield {}, logged, oracle
+
+    monkeypatch.setattr(evaluation, "iter_pairs", batches)
+    if propensity == np.finfo(float).smallest_subnormal:
+        with pytest.raises(ValueError, match="exceeds the float64 range"):
+            evaluation.evaluate_policy("unused")
+        return
+
+    estimate = logged["y_reward"][0].as_py() / (2 * propensity)
+    result = evaluation.evaluate_policy("unused")
+    assert result["ips"]["value"] == pytest.approx(estimate)
+    assert result["ips"]["se_building_cluster"] == pytest.approx(abs(estimate))
+    assert result["row_weight_ess_diagnostic"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "propensity,reward",
+    [
+        (1e-308, -1.0),
+        (np.finfo(float).smallest_subnormal, -np.finfo(np.float32).smallest_subnormal),
+    ],
+)
+def test_finite_policy_ratios_survive_overflow_in_unscaled_totals(
+    monkeypatch, policy_tables, propensity, reward
+):
+    logged, oracle = (table.take([0, 24]) for table in policy_tables)
+    replacements = {
+        "obs_temp_last_c": logged["setpoint_c"],
+        "action": 1,
+        "propensity": propensity,
+        "p_action_0": 0.5,
+        "p_action_1": propensity,
+        "p_action_2": 0.5,
+        "y_reward": reward,
+    }
+    for column, value in replacements.items():
+        field = logged.schema.field(column)
+        data = (
+            value if isinstance(value, pa.ChunkedArray) else pa.array([value] * 2, type=field.type)
+        )
+        logged = logged.set_column(logged.schema.get_field_index(column), field, data)
+    oracle = oracle.set_column(
+        oracle.schema.get_field_index("cf_reward_1"),
+        oracle.schema.field("cf_reward_1"),
+        pa.array([reward] * 2, type=pa.float32()),
+    )
+
+    def batches(*args, **kwargs):
+        yield {}, logged, oracle
+
+    monkeypatch.setattr(evaluation, "iter_pairs", batches)
+    result = evaluation.evaluate_policy("unused")
+    assert result["ips"]["value"] == pytest.approx(float(reward) / propensity)
+    assert result["ips"]["se_building_cluster"] == 0.0
+    assert result["snips"]["value"] == pytest.approx(float(reward), rel=1e-12, abs=0.0)
+    assert result["row_weight_ess_diagnostic"] == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize(

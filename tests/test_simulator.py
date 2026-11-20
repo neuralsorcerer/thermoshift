@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
+from decimal import Decimal, DefaultContext, Inexact, localcontext
 from fractions import Fraction
 
 import numpy as np
@@ -66,6 +68,46 @@ def test_thermal_solution_reports_incompatible_shapes():
         thermal_step(np.zeros(2), np.zeros(3), 2, 4, 3, 0)
 
 
+@pytest.mark.parametrize(
+    "temperature",
+    [
+        3 + 2j,
+        np.complex128(3 + 2j),
+        np.array([np.complex64(3 + 2j)], dtype=object),
+        np.datetime64("NaT", "ns"),
+        np.timedelta64(20, "D"),
+        np.array([np.datetime64("2026", "ns")], dtype=object),
+    ],
+)
+def test_thermal_solution_rejects_nonnumeric_and_complex_dtypes(temperature):
+    with pytest.raises(ValueError, match="real numbers"):
+        thermal_step(temperature, 30, 2, 4, 3, 0)
+
+
+def test_thermal_solution_rejects_masked_values():
+    with pytest.raises(ValueError, match="a real value at every position"):
+        thermal_step(np.ma.array([20.0], mask=[True]), 30, 2, 4, 3, 0)
+
+
+def test_thermal_solution_rejects_inputs_outside_float64():
+    with np.errstate(over="ignore"):
+        extended = np.longdouble(np.finfo(np.float64).max) * np.longdouble(2)
+    with np.errstate(all="raise"):
+        for temperature in (extended, 10**400):
+            with pytest.raises(ValueError, match="must be finite"):
+                thermal_step(temperature, 30, 2, 4, 3, 0)
+
+
+def test_thermal_solution_keeps_validation_for_empty_broadcasts():
+    result = thermal_step(np.empty((2, 0)), 30, 2, 4, 3, 0)
+    assert result.shape == (2, 0)
+    assert result.dtype == np.float64
+    with pytest.raises(ValueError, match="conductance"):
+        thermal_step([], 30, -2, 4, 3, 0)
+    with pytest.raises(ValueError, match="outdoor.*must be finite"):
+        thermal_step([], np.inf, 2, 4, 3, 0)
+
+
 def test_thermal_solution_handles_overflowing_rate():
     # With C/G far below one hour, temperature reaches the forced equilibrium.
     with np.errstate(divide="raise", invalid="raise", over="raise"):
@@ -90,9 +132,7 @@ def test_thermal_solution_keeps_opposing_extreme_terms_representable():
 
 def test_thermal_solution_recovers_representable_result_after_intermediate_overflow():
     # A heat response far above one overflows each separate forcing product
-    # while their difference stays representable. The extended-precision retry
-    # subtracts first, so it recovers the result even where longdouble is only
-    # as wide as float64.
+    # while their difference stays representable.
     conductance = capacity = 1e-9
     heat, cooling = 1e301, 1e301 - 1e290
     response = Fraction(float(-np.expm1(-1.0))) / Fraction(conductance)
@@ -101,6 +141,66 @@ def test_thermal_solution_recovers_representable_result_after_intermediate_overf
     result = thermal_step(0.0, 0.0, conductance, capacity, heat, cooling)
     expected = (Fraction(heat) - Fraction(cooling)) * response
     assert result == pytest.approx(float(expected))
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        ((0, 0, 0, 1e-310, 1e-310, 0), 1),
+        ((1e308, 0, 1, 0.025, 0, 0), 1e308 * math.exp(-40)),
+        ((1e308, 1e308, 1, 0.025, 0, 1e308), 1e308 * math.exp(-40)),
+        ((0, 1e308, 1e-200, 1e200, 0, 0), 1e-92),
+        ((1e308, 0, 735, 1, 0, 0), math.exp(math.log(1e308) - 735)),
+    ],
+)
+def test_thermal_solution_preserves_finite_results_at_float64_limits(arguments, expected):
+    with np.errstate(all="raise"):
+        result = thermal_step(*arguments)
+    assert result == pytest.approx(expected, rel=2e-12, abs=0)
+
+
+def test_thermal_solution_sums_subnormal_terms_before_rounding():
+    smallest = float.fromhex("0x0.0000000000001p-1022")
+    # Each contribution is roughly one third of the smallest subnormal.
+    # Rounded separately both vanish, but the sum rounds up.
+    with np.errstate(all="raise"):
+        result = thermal_step([smallest, 30], 0, 2, 1.8, [smallest, 0], 0)
+        ordinary = thermal_step(30, 0, 2, 1.8, 0, 0)
+    np.testing.assert_array_equal(result, [smallest, ordinary])
+
+
+def test_thermal_solution_uses_its_own_precision_and_rounding_context(monkeypatch):
+    monkeypatch.setitem(DefaultContext.traps, Inexact, True)
+    result = thermal_step(1e308, 0, 735, 1, 0, 0)
+    assert result == pytest.approx(math.exp(math.log(1e308) - 735), rel=2e-12, abs=0)
+
+
+def test_thermal_solution_resolves_nearly_balanced_opposing_temperatures():
+    rate = math.log(2)
+    with localcontext() as reference:
+        reference.prec = 100
+        offset = Decimal(2).ln() - Decimal.from_float(rate)
+        expected = float(20 * (offset.exp() - 1))
+    result = thermal_step(np.full(64, 20.0), -20.0, rate, 1.0, 0.0, 0.0)
+    np.testing.assert_allclose(result, expected, rtol=2e-13, atol=0)
+
+
+def test_thermal_solution_resolves_deep_cancellation_with_multiple_forcing_terms():
+    # Three float64 terms approximate the equilibrium needed to cancel the
+    # indoor transient. Their remaining imbalance is smaller than 1e-40.
+    with localcontext() as reference:
+        reference.prec = 120
+        growth = Decimal(1).exp() - 1
+        equilibrium = -1 / growth
+        outdoor = float(equilibrium)
+        residual = equilibrium - Decimal.from_float(outdoor)
+        heat = float(residual)
+        cooling = -float(residual - Decimal.from_float(heat))
+        forcing = sum(Decimal.from_float(value) for value in (outdoor, heat, -cooling))
+        expected = float((1 + growth * forcing) / (1 + growth))
+    assert 0 < abs(expected) < 1e-40
+    result = thermal_step(1.0, outdoor, 1.0, 1.0, heat, cooling)
+    assert result == pytest.approx(expected, rel=2e-13, abs=0)
 
 
 def test_thermal_solution_rejects_truly_nonfinite_result_from_finite_inputs():

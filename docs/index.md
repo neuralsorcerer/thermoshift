@@ -17,7 +17,7 @@ From PyPI:
 pip install thermoshift
 ```
 
-Use Python 3.11 or later. From a source checkout:
+Use Python 3.12 or later. From a source checkout:
 
 ```bash
 git clone https://github.com/neuralsorcerer/thermoshift.git

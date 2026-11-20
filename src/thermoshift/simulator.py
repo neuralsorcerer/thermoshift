@@ -6,6 +6,8 @@
 
 """Vectorized one-zone, one-hour RC simulator with shared-noise potential outcomes."""
 
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
+
 import numpy as np
 import pyarrow as pa
 
@@ -13,24 +15,81 @@ from thermoshift.config import LEVELS, Config, integer
 from thermoshift.random import normal, split_codes, uniform
 from thermoshift.schema import SCHEMAS
 
+_FLOAT64 = np.finfo(np.float64)
+_CANCELLATION_RATIO = np.sqrt(_FLOAT64.eps)
+_NEGLIGIBLE_DECAY_RATE = 1500
+# A ratio of positive float64 inputs can be as small as 1e-632. Allow
+# for that cancellation in 1 - decay and for cancellation in the sum.
+_THERMAL_CONTEXT = Context(prec=1400, rounding=ROUND_HALF_EVEN, Emin=-9999, Emax=9999, traps=[])
+
+
+def _thermal_input(value):
+    if isinstance(value, np.ma.MaskedArray) and np.ma.is_masked(value):
+        raise ValueError("thermal inputs must contain a real value at every position")
+    array = np.asarray(value)
+    if array.dtype.kind in "cmM" or (
+        array.dtype.kind == "O"
+        and any(
+            isinstance(item, (complex, np.complexfloating, np.datetime64, np.timedelta64))
+            for item in array.flat
+        )
+    ):
+        raise ValueError("thermal inputs must be real numbers")
+    try:
+        return array.astype(np.float64, copy=False)
+    except OverflowError as error:
+        raise ValueError("thermal inputs must be finite in float64") from error
+
+
+def _thermal_step_precise(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
+    """Evaluate an exceptional element without platform-specific extended floats."""
+    temp, outdoor, conductance, capacity, heat_kw, cooling_kw = (
+        Decimal.from_float(float(value))
+        for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
+    )
+    with localcontext(_THERMAL_CONTEXT) as context:
+        net_heat = heat_kw - cooling_kw
+        if not conductance:
+            return float(temp + net_heat / capacity)
+        rate = conductance / capacity
+        equilibrium = (outdoor * conductance + net_heat) / conductance
+        # The transient is zero at equilibrium and too small to affect a
+        # finite float64 result above the rate cutoff.
+        if temp == equilibrium or rate >= _NEGLIGIBLE_DECAY_RATE:
+            return float(equilibrium)
+        # Keep digits to resolve 1 - decay when the rate is small. Opposite
+        # signs need guard digits for cancellation. Most cases can finish
+        # with these digits, so only deeper cancellation uses full precision.
+        can_cancel = bool(temp and equilibrium) and temp.is_signed() != equilibrium.is_signed()
+        guard_digits = 30 if can_cancel else 0
+        first_precision = 35 + max(0, -rate.adjusted()) + guard_digits
+        for precision in (first_precision, _THERMAL_CONTEXT.prec):
+            context.prec = precision
+            decay = (-rate).exp()
+            interior = decay * temp
+            exterior = (1 - decay) * equilibrium
+            result = interior + exterior
+            if not can_cancel or (
+                result
+                and result.adjusted()
+                >= max(interior.adjusted(), exterior.adjusted()) - guard_digits
+            ):
+                break
+        return float(result)
+
 
 def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
     """Exact constant-forcing RC solution for dt=1 h, temperatures in degC.
 
-    Inputs broadcast as float64 arrays. Conductance must be finite and
-    nonnegative, and capacity finite and positive. Zero conductance is the
+    Inputs broadcast as real, finite float64 arrays. Conductance must be
+    nonnegative and capacity must be positive. Zero conductance is the
     insulated-building limit.
     """
-    temp, outdoor, conductance, capacity, heat_kw, cooling_kw = (
-        np.asarray(value, dtype=np.float64)
-        for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
-    )
-    try:
-        temp, outdoor, conductance, capacity, heat_kw, cooling_kw = np.broadcast_arrays(
-            temp, outdoor, conductance, capacity, heat_kw, cooling_kw
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        temp, outdoor, conductance, capacity, heat_kw, cooling_kw = (
+            _thermal_input(value)
+            for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
         )
-    except ValueError as error:
-        raise ValueError("thermal inputs must have broadcast-compatible shapes") from error
     if np.any(~np.isfinite(conductance) | (conductance < 0)) or np.any(
         ~np.isfinite(capacity) | (capacity <= 0)
     ):
@@ -39,61 +98,57 @@ def thermal_step(temp, outdoor, conductance, capacity, heat_kw, cooling_kw):
         )
     if any(np.any(~np.isfinite(value)) for value in (temp, outdoor, heat_kw, cooling_kw)):
         raise ValueError("temperature, outdoor temperature, heat and cooling must be finite")
-    # Finite physical inputs can produce an infinite rate; the exponential
-    # then correctly saturates at one without overflowing the resulting state.
-    with np.errstate(over="ignore", under="ignore"):
+    try:
+        temp, outdoor, conductance, capacity, heat_kw, cooling_kw = np.broadcast_arrays(
+            temp, outdoor, conductance, capacity, heat_kw, cooling_kw
+        )
+    except ValueError as error:
+        raise ValueError("thermal inputs must have broadcast-compatible shapes") from error
+    # Finite inputs can overflow intermediate coefficients or products.
+    # Compute the usual vectorized solution, then retry affected elements.
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         rate = conductance / capacity
-    alpha = -np.expm1(-rate)
-    # Integrate heat separately so heat/conductance cannot overflow before
-    # multiplication by alpha. The series also covers zero and subnormal rates.
-    small = rate < 1e-8
-    heat_response = np.divide(alpha, conductance, out=np.zeros_like(rate), where=~small)
-    np.divide(1.0 - 0.5 * rate, capacity, out=heat_response, where=small)
-    # Keep both differences factored into individually bounded products. Since
-    # alpha is in [0, 1] and heat_response is at most 1/capacity, every term
-    # here is bounded by its own input, so computing the ambient or forcing
-    # difference first can overflow even when all scaled terms and their final
-    # sum are representable.
-    with np.errstate(over="ignore", invalid="ignore"):
-        ambient = (1.0 - alpha) * temp + alpha * outdoor
-        forcing = heat_kw * heat_response - cooling_kw * heat_response
-        result = ambient + forcing
-    # The opposite ordering covers the opposite extreme: a heat response far
-    # above one overflows each separate product while the difference stays
-    # representable. Retry those exceptional intermediates with the difference
-    # taken first, in extended precision where the platform provides it. This
-    # is a rare public-API fallback; configured dataset parameters remain on
-    # the vectorized float64 path above.
-    if np.any(~np.isfinite(result)):
-        wide = [
-            value.astype(np.longdouble)
-            for value in (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
+        alpha = -np.expm1(-rate)
+        decay = np.subtract(1.0, alpha, out=np.empty_like(rate))
+        # At higher rates, 1 - alpha loses significant digits or rounds to zero.
+        np.exp(-rate, out=decay, where=rate >= 1.0)
+        # The series covers zero conductance without dividing by it.
+        small = rate < 1e-8
+        heat_response = np.divide(alpha, conductance, out=np.zeros_like(rate), where=~small)
+        np.divide(1.0 - 0.5 * rate, capacity, out=heat_response, where=small)
+        indoor_term = decay * temp
+        outdoor_term = alpha * outdoor
+        heat_term = heat_kw * heat_response
+        cooling_term = cooling_kw * heat_response
+        forcing = heat_term - cooling_term
+        result = indoor_term + outdoor_term + forcing
+        largest_term = np.maximum(
+            np.maximum(np.abs(indoor_term), np.abs(outdoor_term)),
+            np.maximum(np.abs(heat_term), np.abs(cooling_term)),
+        )
+        # Retry if cancellation discards at least half the significant bits,
+        # or if a subnormal coefficient or result may have rounded too early.
+        retry = (
+            ~np.isfinite(result)
+            | (np.abs(result) < _CANCELLATION_RATIO * largest_term)
+            | ((rate < _FLOAT64.tiny) & (conductance > 0))
+            | ((decay < _FLOAT64.tiny) & (rate < _NEGLIGIBLE_DECAY_RATE) & (temp != 0))
+            | (
+                (np.abs(result) < _FLOAT64.tiny)
+                & ((temp != 0) | ((conductance > 0) & (outdoor != 0)) | (heat_kw != cooling_kw))
+            )
+        )
+    if np.any(retry):
+        result = np.asarray(result)
+        inputs = (temp, outdoor, conductance, capacity, heat_kw, cooling_kw)
+        corrected = [
+            _thermal_step_precise(*values)
+            for values in zip(*(value[retry] for value in inputs), strict=True)
         ]
-        wide_temp, wide_outdoor, wide_conductance, wide_capacity, wide_heat, wide_cooling = wide
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            wide_rate = wide_conductance / wide_capacity
-            wide_alpha = -np.expm1(-wide_rate)
-            wide_small = wide_rate < 1e-8
-            wide_response = np.divide(
-                wide_alpha,
-                wide_conductance,
-                out=np.zeros_like(wide_rate),
-                where=~wide_small,
-            )
-            np.divide(
-                1 - wide_rate / 2,
-                wide_capacity,
-                out=wide_response,
-                where=wide_small,
-            )
-            wide_result = (
-                wide_temp
-                + wide_alpha * (wide_outdoor - wide_temp)
-                + (wide_heat - wide_cooling) * wide_response
-            )
-            result = wide_result.astype(np.float64)
-        if np.any(~np.isfinite(result)):
+        if not np.all(np.isfinite(corrected)):
             raise ValueError("thermal inputs produce a nonfinite temperature")
+        result[retry] = corrected
+        return result[()]
     return result
 
 

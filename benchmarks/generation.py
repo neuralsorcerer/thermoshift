@@ -16,14 +16,17 @@ from dataclasses import asdict
 from pathlib import Path
 
 from thermoshift import Config, generate, initialize, validate
+from thermoshift.config import integer
 from thermoshift.filesystem import atomic_json, read_json
-from thermoshift.provenance import runtime, source_digest
+from thermoshift.provenance import experiment_report_path, runtime, source_digest
 
 
 def benchmark(output: str | Path, config: Config, workers: int, batch_buildings: int) -> dict:
     """Generate a fresh release and return measurements for this run."""
+    integer(workers, "workers", 1)
+    integer(batch_buildings, "batch_buildings", 1)
     output = Path(output)
-    if output.exists() and any(output.iterdir()):
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("benchmark output must be an empty directory")
     initialize(output, config)
     started = time.perf_counter()
@@ -75,15 +78,19 @@ def main() -> None:
     parser.add_argument("--shard-buildings", type=int, default=16_384)
     parser.add_argument("--report")
     args = parser.parse_args()
-    config = Config(
-        rows=args.rows,
-        seed=args.seed,
-        episode_steps=args.episode_steps,
-        shard_buildings=args.shard_buildings,
-    )
-    result = benchmark(args.output, config, args.workers, args.batch_buildings)
-    if args.report:
-        atomic_json(args.report, result)
+    try:
+        report = experiment_report_path(args.report, args.output) if args.report else None
+        config = Config(
+            rows=args.rows,
+            seed=args.seed,
+            episode_steps=args.episode_steps,
+            shard_buildings=args.shard_buildings,
+        )
+        result = benchmark(args.output, config, args.workers, args.batch_buildings)
+    except ValueError as error:
+        parser.error(str(error))
+    if report is not None:
+        atomic_json(report, result)
     print(json.dumps(result, indent=2, allow_nan=False))
 
 

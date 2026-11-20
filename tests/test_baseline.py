@@ -6,12 +6,15 @@
 
 """Bounded reading and the reference temperature baseline."""
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from thermoshift import Config
+from thermoshift import Config, baseline
 from thermoshift.baseline import matrix, read_bounded, train_baseline
 from thermoshift.config import SPLITS
-from thermoshift.filesystem import read_json
+from thermoshift.filesystem import atomic_json, read_json, sha256
 from thermoshift.schema import FEATURES, LOGGED_SCHEMA, feature_roles
 from thermoshift.storage import generate, initialize
 
@@ -40,7 +43,35 @@ def test_bounded_reader_reports_an_absent_split_as_none(tmp_path):
     assert read_bounded(tmp_path, empty[0], 5) is None
 
 
-@pytest.mark.parametrize("split,limit", [("nope", 5), ("train", 0), ("train", -1), ("train", True)])
+def test_bounded_reader_detects_training_rows_in_a_held_out_split(release):
+    manifest_path = release / "manifest.json"
+    manifest = read_json(manifest_path)
+    files = [item for item in manifest["files"] if item["kind"] == "logged"]
+    test = next(item for item in files if item["split"] == "test")
+    train = next(
+        item for item in files if item["split"] == "train" and item["shard_id"] == test["shard_id"]
+    )
+    path = release / test["path"]
+    train_row = pq.read_table(release / train["path"]).slice(0, 1)
+    held_out = pq.read_table(path).slice(1)
+    corrupted = pa.concat_tables([train_row, held_out]).sort_by([("row_id", "ascending")])
+    pq.write_table(corrupted, path)
+    test.update(bytes=path.stat().st_size, sha256=sha256(path))
+    manifest["bytes"] = sum(item["bytes"] for item in manifest["files"])
+    atomic_json(manifest_path, manifest)
+    success_path = release / "_SUCCESS.json"
+    success = read_json(success_path)
+    success["manifest_sha256"] = sha256(manifest_path)
+    atomic_json(success_path, success)
+
+    with pytest.raises(ValueError, match="building leakage across splits"):
+        read_bounded(release, "test", test["rows"])
+
+
+@pytest.mark.parametrize(
+    "split,limit",
+    [("nope", 5), (np.array(["train"]), 5), ("train", 0), ("train", -1), ("train", True)],
+)
 def test_bounded_reader_rejects_invalid_arguments(release, split, limit):
     with pytest.raises(ValueError):
         read_bounded(release, split, limit)
@@ -57,6 +88,23 @@ def test_baseline_scores_every_nonempty_evaluation_split(release):
         # RMSE dominates MAE for any error distribution.
         assert 0 <= scores["model_mae_c"] <= scores["model_rmse_c"]
         assert 0 <= scores["persistence_mae_c"] <= scores["persistence_rmse_c"]
+
+
+def test_baseline_scores_finite_temperatures_beyond_float32_error_range(release, monkeypatch):
+    original = baseline._read_bounded
+    extreme = np.float32(3e38)
+
+    def read(root, config, manifest, split, limit):
+        frame = original(root, config, manifest, split, limit)
+        if split == "test":
+            frame["y_next_temp_c"] = extreme
+            frame["obs_temp_last_c"] = -extreme
+        return frame
+
+    monkeypatch.setattr(baseline, "_read_bounded", read)
+    scores = train_baseline(release, max_train=10, max_eval=3)["splits"]["test"]
+    assert scores["persistence_mae_c"] == pytest.approx(2 * float(extreme))
+    assert scores["persistence_rmse_c"] == pytest.approx(2 * float(extreme))
 
 
 def test_baseline_never_sees_targets_or_propensities(release):

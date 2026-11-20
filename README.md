@@ -10,7 +10,7 @@ Synthetic building-cooling trajectories with paired counterfactual outcomes for 
 <div align="center">
 
 [![Current Release](https://img.shields.io/github/release/neuralsorcerer/thermoshift.svg)](https://github.com/neuralsorcerer/thermoshift/releases)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Test Linux](https://github.com/neuralsorcerer/thermoshift/actions/workflows/ubuntu.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/thermoshift/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/windows.yml?query=branch%3Amain)
 [![Test macOS](https://github.com/neuralsorcerer/thermoshift/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/neuralsorcerer/thermoshift/actions/workflows/macos.yml?query=branch%3Amain)
@@ -59,7 +59,7 @@ trajectory requires simulating the states that policy would produce.
 Browse the [documentation guides](docs/index.md), or see
 [development and documentation](docs/development.md) to build the Sphinx site locally.
 
-Use Python 3.11 or later. Core dependencies are NumPy, PyArrow,
+Use Python 3.12 or later. Core dependencies are NumPy, PyArrow,
 filelock, portalocker, and PyYAML; version ranges are defined in
 [pyproject.toml](pyproject.toml).
 
@@ -263,9 +263,9 @@ with closing(iter_pairs("output/demo", split="test", batch_size=1024)) as batche
 ```
 
 `iter_pairs` verifies release metadata and file checksums before yielding its first
-batch. It holds an exclusive dataset lease until exhausted or closed; the context
-manager releases it even when stopping early. It verifies file integrity but does
-not run the full record-level validation scan.
+batch. It checks paired row identifiers for ordering and membership in their
+shards and splits as records are read. It holds an exclusive dataset lease until
+exhausted or closed, including when the context manager closes it after an early stop.
 
 ### Select features and run reference experiments
 
@@ -562,7 +562,7 @@ use. Publication performs a fresh full local validation regardless of a saved re
 | Shard is incomplete during finalization | Complete all ranks, then run `finalize` and full validation. |
 | Parquet checksum fails | Resume generation in the original environment to rebuild the affected shard, then validate. |
 | Release metadata checksum fails | Restore the original bound metadata; do not hand-edit a finalized card, schema, or manifest. |
-| Observable logging policy is not exactly reproducible | Check the release source/runtime provenance, especially for the bundled sample. Generate and validate a fresh release in the active environment. |
+| Observable logging policy equation fails | Check the release configuration and provenance. If the release was transferred, verify it against the original files. |
 | No rows for a requested split / too few training rows | Inspect `manifest.json`; use a larger release because small building samples can leave splits empty. |
 | Memory pressure or poor worker utilization | Reduce batch size or workers; check `plan` to ensure enough shards exist for parallel work. |
 | Publication target, visibility, or parent-commit conflict | Check the bound repository/branch and remote changes; resume the matching target or use a separate release. See the publishing guide. |
@@ -574,10 +574,10 @@ Install all development and example dependencies, then run the repository checks
 ```bash
 python -m pip install -e ".[dev,hub,analysis,notebook]"
 python -m pip check
-python -m ruff check src tests examples scripts benchmarks docs
-python -m ruff format --check src tests examples scripts benchmarks docs
+python -m ruff check src tests examples scripts benchmarks docs notebooks
+python -m ruff format --check src tests examples scripts benchmarks docs notebooks
 python scripts/update_schema.py --check
-python -m pytest -q
+python -m pytest -q -W error
 ```
 
 The `dev` extra also installs pre-commit, which runs the same file-aware lint and

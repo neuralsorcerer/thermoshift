@@ -9,13 +9,17 @@
 from __future__ import annotations
 
 import hashlib
+from base64 import b64encode
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from thermoshift.config import boolean
 from thermoshift.filesystem import atomic_json, dataset_path, read_json, sha256
 from thermoshift.lifecycle import dataset_lock
 
+DEFAULT_HUB_ENDPOINT = "https://huggingface.co"
 UPLOAD_PATTERNS = [
     "data/**/*.parquet",
     "README.md",
@@ -100,7 +104,7 @@ def publish(
     root = Path(root).resolve()
     with dataset_lock(root):
         # Never rely on an old cached validation report for a publication gate.
-        _validate_locked(root, full=True)
+        _validate_locked(root, full=True, write_report=not dry_run)
         config, manifest = _validated_manifest(root, verify_hash=False)
         success = read_json(root / "_SUCCESS.json")
         intent = {
@@ -131,16 +135,36 @@ def publish(
             CommitOperationAdd,
             CommitOperationDelete,
             HfApi,
-            hf_hub_download,
         )
         from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
 
         binding_path = dataset_path(root, "_state/hub_binding.json")
         publication_path = dataset_path(root, "_PUBLICATION.json")
-        binding = {"repo_id": repo_id, "revision": revision, "public": public, **intent}
-        if binding_path.exists() and read_json(binding_path) != binding:
-            raise ValueError("this output is already bound to a different Hub target or release")
-        api = HfApi()  # hf auth login or HF_TOKEN; no credentials enter release files.
+        api = HfApi()
+        address = urlsplit(api.endpoint.rstrip("/"))
+        endpoint = address._replace(netloc=address.netloc.rsplit("@", 1)[-1]).geturl()
+        if address.username or address.password:
+            # Preserve URL-based authentication without passing credentials in URLs.
+            username = unquote(address.username or "")
+            password = unquote(address.password or "")
+            credentials = b64encode(f"{username}:{password}".encode()).decode("ascii")
+            api.headers = {**(api.headers or {}), "authorization": f"Basic {credentials}"}
+        api.endpoint = endpoint
+        binding = {
+            "endpoint": endpoint,
+            "repo_id": repo_id,
+            "revision": revision,
+            "public": public,
+            **intent,
+        }
+        if binding_path.exists():
+            current = read_json(binding_path)
+            if isinstance(current, dict):
+                current = {"endpoint": DEFAULT_HUB_ENDPOINT, **current}
+            if current != binding:
+                raise ValueError(
+                    "this output is already bound to a different Hub target or release"
+                )
         try:
             info = api.repo_info(repo_id=repo_id, repo_type="dataset", revision=revision)
         except RevisionNotFoundError:
@@ -161,21 +185,37 @@ def publish(
         head = info.sha
         if not isinstance(head, str) or not head:
             raise ValueError("Hub did not return an immutable repository head SHA")
+        # The info endpoint accepts tags and commit SHAs as well as branches.
+        # Check the writable target before persisting the local binding.
+        refs = api.list_repo_refs(repo_id=repo_id, repo_type="dataset")
+        if not any(revision in (branch.name, branch.ref) for branch in refs.branches):
+            raise ValueError("revision must name an existing branch; create the branch first")
         remote_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset", revision=head)
-        if any(f != ".gitattributes" for f in remote_files):
+        resuming = any(f != ".gitattributes" for f in remote_files)
+        if resuming:
             if not {"run_config.json", "_PUBLICATION.json"}.issubset(remote_files):
                 raise ValueError(
                     "remote branch contains files but no matching ThermoShift publication intent"
                 )
-            for name, expected in (
-                ("run_config.json", read_json(root / "run_config.json")),
-                ("_PUBLICATION.json", intent),
-            ):
-                cached = hf_hub_download(repo_id, name, repo_type="dataset", revision=head)
-                if read_json(cached) != expected:
-                    raise ValueError(
-                        "remote release has different provenance or content; use a new repository or branch"
+            # Cache hits for pinned commits bypass the Hub entirely. Read both
+            # provenance documents from the verified endpoint before writing.
+            with TemporaryDirectory(prefix="thermoshift-publication-") as directory:
+                for name, expected in (
+                    ("run_config.json", read_json(root / "run_config.json")),
+                    ("_PUBLICATION.json", intent),
+                ):
+                    downloaded = api.hf_hub_download(
+                        repo_id,
+                        name,
+                        repo_type="dataset",
+                        revision=head,
+                        local_dir=directory,
+                        force_download=True,
                     )
+                    if read_json(downloaded) != expected:
+                        raise ValueError(
+                            "remote release has different provenance or content; use a new repository or branch"
+                        )
         expected_data = {f["path"] for f in manifest["files"]}
         if any(f.startswith("data/") and f not in expected_data for f in remote_files):
             raise ValueError(
@@ -183,28 +223,34 @@ def publish(
             )
         atomic_json(publication_path, intent)
         atomic_json(binding_path, binding)
-        operations = [
-            CommitOperationAdd(path_in_repo=name, path_or_fileobj=root / name)
-            for name in ("run_config.json", "_PUBLICATION.json")
-        ]
         # A retry can overwrite a previously completed tree. Invalidate its
         # marker in the guarded commit before uploading any replacement bytes.
-        if "_SUCCESS.json" in remote_files:
-            operations.append(CommitOperationDelete(path_in_repo="_SUCCESS.json"))
-        provenance = api.create_commit(
-            repo_id=repo_id,
-            repo_type="dataset",
-            revision=revision,
-            parent_commit=head,
-            operations=operations,
-            commit_message="Record ThermoShift provenance and immutable publication intent",
-        )
+        # On an incomplete retry the provenance already exists at the checked
+        # head. The SDK can skip an unchanged commit and return the current head
+        # without enforcing parent_commit, so keep the checked head instead.
+        marked_complete = "_SUCCESS.json" in remote_files
+        if not resuming or marked_complete:
+            operations = [
+                CommitOperationAdd(path_in_repo=name, path_or_fileobj=root / name)
+                for name in ("run_config.json", "_PUBLICATION.json")
+            ]
+            if marked_complete:
+                operations.append(CommitOperationDelete(path_in_repo="_SUCCESS.json"))
+            provenance = api.create_commit(
+                repo_id=repo_id,
+                repo_type="dataset",
+                revision=revision,
+                parent_commit=head,
+                operations=operations,
+                commit_message="Record ThermoShift provenance and immutable publication intent",
+            )
+            head = provenance.oid
         payload = api.upload_folder(
             repo_id=repo_id,
             repo_type="dataset",
             folder_path=root,
             revision=revision,
-            parent_commit=provenance.oid,
+            parent_commit=head,
             allow_patterns=UPLOAD_PATTERNS,
             commit_message=f"Publish ThermoShift {config.rows:,} decisions ({config.fingerprint[:12]})",
         )
@@ -224,5 +270,5 @@ def publish(
         return {
             **plan,
             "commit_sha": commit.oid,
-            "url": f"https://huggingface.co/datasets/{repo_id}/tree/{commit.oid}",
+            "url": f"{endpoint}/datasets/{repo_id}/tree/{commit.oid}",
         }

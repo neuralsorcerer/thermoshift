@@ -163,12 +163,13 @@ such as `FileNotFoundError`. `verify_hash` must be a strict boolean.
 
 ### `iter_pairs(root, split=None, batch_size=65536) -> iterator`
 
-Yields `(file_info, logged, oracle)` in numeric shard order. `logged` and
-`oracle` are PyArrow tables with matching rows and `row_id`s; `file_info` is the
-manifest entry for the logged file. `split=None` reads all splits, while a split
-name restricts the iterator to that split. The iterator verifies checksums before
-the first batch and holds an exclusive lifecycle lease until exhausted or
-closed. Close it when stopping early:
+Yields `(file_info, logged, oracle)`. Within each split, files are read in
+numeric shard order. `logged` and `oracle` are PyArrow tables with matching
+identifiers, which are checked for ordering and membership in the file's shard
+and split. `file_info` is the manifest entry for the logged file. `split=None`
+reads all splits, while a split name restricts the iterator to that split.
+The iterator verifies checksums before the first batch and holds an exclusive
+lifecycle lease until exhausted or closed. Close it when stopping early:
 
 ```python
 from contextlib import closing
@@ -200,9 +201,10 @@ vectorized one-hour exact constant-forcing RC step used by the simulator. It
 returns the next temperature as a NumPy-compatible scalar or array. Temperatures
 are in degrees Celsius, conductance in kW/degree Celsius, capacity in
 kWh/degree Celsius, and heat/cooling in kW.
-Inputs broadcast in float64. Conductance must be nonnegative and capacity
-positive, and both must be finite; invalid physical parameters raise `ValueError`. At zero conductance,
-the insulated-building limit is `temp + (heat_kw - cooling_kw) / capacity`.
+Inputs broadcast in float64 and must be real and finite. Conductance must be
+nonnegative and capacity must be positive. Invalid physical parameters or a
+nonfinite float64 result raise `ValueError`. At zero conductance, the
+insulated-building limit is `temp + (heat_kw - cooling_kw) / capacity`.
 
 ```python
 from thermoshift import Config, simulate
@@ -251,8 +253,10 @@ the supplied propensities. The result includes `split`, `rows`,
 `independent_buildings`, `estimand`, `overlap_status`, ratio objects for `ips`,
 `snips`, `oracle_policy_value`, `logged_policy_value`, and
 `oracle_one_step_regret`, `row_weight_ess_diagnostic`, and `notes`. Each ratio
-object has `value`, `se_building_cluster`, and `ci95_normal_approx`; fields are
-`None` when overlap or cluster count is insufficient. It requires a finalized,
+includes `value`, `se_building_cluster`, and `ci95_normal_approx`. With a single
+building, defined point estimates are returned and cluster uncertainty is `None`.
+With no matches, IPS is zero with no uncertainty, SNIPS fields are `None`, and
+the unweighted estimates are still available. The evaluator requires a finalized,
 nonempty split and raises `ValueError` for invalid or empty data. Missing release
 paths or files can raise an `OSError`.
 
@@ -275,17 +279,18 @@ print(scores["splits"].get("test"))
 ### `read_bounded(root, split, limit) -> pandas.DataFrame | None`
 
 Also requires the `analysis` extra. It verifies the release under an exclusive
-lease, then returns at most `limit` leading rows of one split as a pandas frame
-containing the policy features plus `action` and `y_next_temp_c`, or `None` when
-the split has no files. `limit` must be a positive integer and `split` must name
-a configured split; both raise `ValueError` otherwise.
+lease and checks the identity and split assignment of the rows it reads. It
+returns at most `limit` leading rows of one split as a pandas frame containing
+the policy features plus `action` and `y_next_temp_c`, or `None` when the split
+has no files. `limit` must be a positive integer and `split` must name a
+configured split. Invalid arguments raise `ValueError`.
 
 `ClusterMoments` is the streaming building-cluster accumulator used by policy
 evaluation. It accepts ordered `(n, 6)` value batches with `add(ids, values)`,
 requires `flush()` before `ratio(numerator, denominator)`, and supports ratio
-pairs `(1,0)`, `(1,2)`, `(3,0)`, `(4,0)`, and `(5,0)`. It is available for
-advanced analysis but its internal accumulator fields are not a stable result
-format.
+pairs `(1,0)`, `(1,2)`, `(3,0)`, `(4,0)`, and `(5,0)`. Supplied values and
+their aggregates must fit in float64. Use the ratio results as the output of
+the accumulator.
 
 ## Publication
 
@@ -294,7 +299,7 @@ format.
 Requires the `hub` extra. It performs a full local validation and publishes a
 verified immutable dataset tree to Hugging Face. `public` and `dry_run` must be
 strict booleans; `repo_id` must be `OWNER/DATASET`; `revision` must be a
-nonempty string.
+nonempty string. Uploads require an existing branch or `main` for a new repository.
 
 With `dry_run=True`, the result is a plan containing `repo_id`, `revision`,
 `visibility`, `decision_rows`, `parquet_files`, `parquet_bytes`,
@@ -310,10 +315,12 @@ or parent-commit mismatches.
 plain-Python code cells in order in the current process, captures stdout/stderr
 and final-expression display output, saves the notebook atomically after each
 cell, and returns the number of code cells executed. It changes into
-`working_directory` during execution and restores the original directory. Syntax,
-execution, and interruption exceptions are saved in the notebook and re-raised.
-Python `__future__` imports carry across cells, and captured stdout/stderr retains
-the order in which the cell emitted it.
+`working_directory` during execution and uses that directory for local imports.
+Cells share a `__main__` module. The runner restores the caller's working
+directory, import path, and `__main__` module after execution. Syntax, execution,
+and interruption exceptions are saved in the notebook and re-raised. Python
+`__future__` imports carry across cells, and captured stdout/stderr retains the
+order in which the cell emitted it. The runner serializes calls in the same process.
 
 ```python
 from thermoshift.notebook import execute

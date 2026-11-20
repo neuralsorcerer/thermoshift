@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import json
 import platform
 import re
 from dataclasses import fields
@@ -29,6 +30,29 @@ BASE_METADATA = (
     "LICENSE",
 )
 SOURCE_ROOT = Path(__file__).parent
+
+
+def experiment_report_path(path: str | Path, root: str | Path) -> Path:
+    """Keep example and benchmark reports separate from managed release files."""
+    path = Path(path)
+    root = Path(root).resolve()
+    destination = path.parent.resolve() / path.name
+    if destination.is_dir() or destination in root.parents:
+        raise ValueError("experiment report must name a file")
+    if destination.is_relative_to(root):
+        parts = destination.relative_to(root).parts
+        if not parts or parts[0].casefold() in {
+            *(name.casefold() for name in BASE_METADATA),
+            "manifest.json",
+            "validation.json",
+            "_success.json",
+            "_publication.json",
+            ".lifecycle.lock",
+            "data",
+            "_state",
+        }:
+            raise ValueError("experiment report must use a path separate from dataset files")
+    return path
 
 
 def source_digest() -> str:
@@ -74,7 +98,8 @@ def check_schema_documents(root: str | Path, repair_missing: bool = False) -> No
         path = dataset_path(root, name)
         if repair_missing and not path.exists():
             atomic_json(path, expected)
-        if read_json(path) != expected:
+        # Compare JSON values without Python's equality between bool and int.
+        if json.dumps(read_json(path), sort_keys=True) != json.dumps(expected, sort_keys=True):
             raise ValueError(f"{name} differs from this schema version")
 
 

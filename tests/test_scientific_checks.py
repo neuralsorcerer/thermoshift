@@ -476,7 +476,15 @@ def test_negative_age_on_available_reading_is_rejected(release):
         validate(release)
 
 
-def test_tiny_negative_cost_cannot_hide_in_equation_tolerance(release):
+@pytest.mark.parametrize(
+    "name,value,message",
+    [
+        ("cost", -1e-8, "negative counterfactual cost"),
+        ("cost", 1e-8, "outage has electricity cost"),
+        ("carbon_kg", 1e-8, "outage has grid emissions"),
+    ],
+)
+def test_outage_accounting_cannot_hide_in_equation_tolerance(release, name, value, message):
     for item in read_json(release / "manifest.json")["files"]:
         if item["kind"] != "logged":
             continue
@@ -489,20 +497,43 @@ def test_tiny_negative_cost_cannot_hide_in_equation_tolerance(release):
         oracle_path = release / item["path"].replace("data/logged/", "data/oracle/")
         o = pq.read_table(oracle_path)
         for table, names, target in (
-            (x, ["y_cost"], path),
-            (o, [f"cf_cost_{a}" for a in range(3)], oracle_path),
+            (x, [f"y_{name}"], path),
+            (o, [f"cf_{name}_{a}" for a in range(3)], oracle_path),
         ):
-            for name in names:
-                data = table[name].to_numpy().copy()
-                data[index] = -1e-8
-                i = table.schema.get_field_index(name)
+            for column in names:
+                data = table[column].to_numpy().copy()
+                data[index] = value
+                i = table.schema.get_field_index(column)
                 table = table.set_column(i, table.schema.field(i), pa.array(data))
             pq.write_table(table, target)
         resign(release)
-        with pytest.raises(ValueError, match="negative counterfactual cost"):
+        with pytest.raises(ValueError, match=message):
             validate(release)
         return
     pytest.fail("fixture must contain an outage")
+
+
+def test_empty_building_has_no_internal_heat_during_outage(release):
+    for item in read_json(release / "manifest.json")["files"]:
+        if item["kind"] != "logged":
+            continue
+        x = pq.read_table(release / item["path"])
+        empty_outages = np.flatnonzero(
+            ~x["grid_available"].to_numpy() & (x["occupancy_count"].to_numpy() == 0)
+        )
+        if not len(empty_outages):
+            continue
+        path = release / item["path"].replace("data/logged/", "data/oracle/")
+        o = pq.read_table(path)
+        index = o.schema.get_field_index("internal_heat_kw")
+        internal_heat = o.column(index).to_numpy().copy()
+        internal_heat[empty_outages[0]] = 1e-8
+        pq.write_table(o.set_column(index, o.schema.field(index), pa.array(internal_heat)), path)
+        resign(release)
+        with pytest.raises(ValueError, match="empty building has internal heat during outage"):
+            validate(release)
+        return
+    pytest.fail("fixture must contain an empty building with an outage")
 
 
 @pytest.mark.parametrize("hidden_confounding", [False, True])
@@ -581,3 +612,319 @@ def test_every_stored_column_is_pinned_by_some_check(tmp_path):
                 path.write_bytes(pristine)
         resign(tmp_path)
     assert not undetected, "corruptions that validation did not detect: " + ", ".join(undetected)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_sensor_bias_validation_crosses_batch_boundaries(tmp_path, batch_size):
+    initialize(tmp_path, Config(rows=9, episode_steps=9))
+    generate(tmp_path, progress=None)
+    assert validate(tmp_path, batch_size=batch_size)["status"] == "passed"
+    item = next(f for f in read_json(tmp_path / "manifest.json")["files"] if f["kind"] == "oracle")
+    path = tmp_path / item["path"]
+    table = pq.read_table(path)
+    index = table.schema.get_field_index("sensor_bias_c")
+    bias = table.column(index).to_numpy().copy()
+    bias[0] += 0.01
+    pq.write_table(table.set_column(index, table.schema.field(index), pa.array(bias)), path)
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="sensor bias is not linear"):
+        validate(tmp_path, batch_size=batch_size)
+
+
+def test_solar_aperture_validation_crosses_dark_hours(tmp_path):
+    initialize(tmp_path, Config(rows=48, episode_steps=48))
+    generate(tmp_path, progress=None)
+    assert validate(tmp_path, batch_size=9)["status"] == "passed"
+    item = next(f for f in read_json(tmp_path / "manifest.json")["files"] if f["kind"] == "logged")
+    path = tmp_path / item["path"]
+    table = pq.read_table(path)
+    index = table.schema.get_field_index("solar_w_m2")
+    irradiance = table.column(index).to_numpy().copy()
+    irradiance[24:] *= 1.001
+    pq.write_table(table.set_column(index, table.schema.field(index), pa.array(irradiance)), path)
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="solar aperture changed"):
+        validate(tmp_path, batch_size=9)
+
+
+def test_logging_validation_accepts_float64_rounding_from_another_cpu(tmp_path, monkeypatch):
+    initialize(tmp_path, Config(rows=24, episode_steps=24))
+    generate(tmp_path, progress=None)
+    exp = np.exp
+    monkeypatch.setattr(np, "exp", lambda values: np.nextafter(exp(values), np.inf))
+    assert validate(tmp_path, write_report=False)["status"] == "passed"
+
+
+def test_dark_solar_heat_is_zero_even_below_thermal_tolerance(tmp_path):
+    initialize(tmp_path, Config(rows=1))
+    generate(tmp_path, progress=None)
+    item = next(f for f in read_json(tmp_path / "manifest.json")["files"] if f["kind"] == "oracle")
+    path = tmp_path / item["path"]
+    table = pq.read_table(path)
+    field = table.schema.field("solar_heat_kw")
+    index = table.schema.get_field_index(field.name)
+    table = table.set_column(index, field, pa.array([1e-6], type=field.type))
+    pq.write_table(table, path)
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="nonzero solar heat without irradiance"):
+        validate(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name,message",
+    [
+        ("base_load_kw", "outside its documented value for the occupancy state"),
+        ("cop", "coefficient of performance below its nominal range"),
+    ],
+)
+def test_outage_still_checks_requested_load_and_split_specific_cop(release, name, message):
+    files = read_json(release / "manifest.json")["files"]
+    for item in files:
+        if item["kind"] != "logged" or item["split"] != "train":
+            continue
+        logged = pq.read_table(release / item["path"])
+        outage = np.flatnonzero(~logged["grid_available"].to_numpy())
+        if not len(outage):
+            continue
+        row = int(outage[0])
+        path = release / item["path"].replace("data/logged/", "data/oracle/")
+        oracle = pq.read_table(path)
+        index = oracle.schema.get_field_index(name)
+        values = oracle.column(index).to_numpy().copy()
+        if name == "base_load_kw":
+            unoccupied_rate = 0.003 * 0.35
+            wrong_rate = unoccupied_rate if logged["occupancy_count"][row].as_py() else 0.003
+            values[row] = wrong_rate * logged["floor_area_m2"][row].as_py()
+        else:
+            excess = max(0, logged["outdoor_temp_c"][row].as_py() - 25)
+            values[row] = 0.90 * (3.2 - 0.045 * excess)
+        pq.write_table(oracle.set_column(index, oracle.schema.field(index), pa.array(values)), path)
+        resign(release)
+        with pytest.raises(ValueError, match=message):
+            validate(release)
+        return
+    pytest.fail("deterministic fixture must contain a training outage")
+
+
+@pytest.mark.filterwarnings("error")
+def test_extreme_finite_outcomes_raise_validation_error(tmp_path):
+    initialize(tmp_path, Config(rows=1))
+    generate(tmp_path, progress=None)
+    files = {
+        f["kind"]: tmp_path / f["path"] for f in read_json(tmp_path / "manifest.json")["files"]
+    }
+    extreme = np.finfo(np.float32).max
+    outcomes = [extreme, -extreme, -extreme]
+    logged, oracle = pq.read_table(files["logged"]), pq.read_table(files["oracle"])
+    columns = [(f"cf_next_temp_c_{action}", [value]) for action, value in enumerate(outcomes)]
+    for name, values in columns:
+        index = oracle.schema.get_field_index(name)
+        field = oracle.schema.field(index)
+        oracle = oracle.set_column(index, field, pa.array(values, type=field.type))
+    index = logged.schema.get_field_index("y_next_temp_c")
+    field = logged.schema.field(index)
+    logged = logged.set_column(
+        index, field, pa.array([outcomes[logged["action"][0].as_py()]], type=field.type)
+    )
+    pq.write_table(logged, files["logged"])
+    pq.write_table(oracle, files["oracle"])
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="thermal balance fails"):
+        validate(tmp_path)
+
+
+def test_paired_reader_bounds_batch_size_and_requires_a_split_name(tmp_path):
+    initialize(tmp_path, Config(rows=1))
+    generate(tmp_path, progress=None)
+    [(item, logged, oracle)] = list(iter_pairs(tmp_path, batch_size=10**100))
+    assert logged.num_rows == oracle.num_rows == 1
+    with pytest.raises(ValueError, match="unknown split"):
+        list(iter_pairs(tmp_path, split=np.array([item["split"]])))
+
+
+def test_paired_reader_checks_split_membership_of_matching_identifiers(release):
+    config, manifest = validated_manifest(release)
+    held_out = next(f for f in manifest["files"] if f["kind"] == "logged" and f["split"] == "test")
+    training = next(
+        f
+        for f in manifest["files"]
+        if f["kind"] == "logged" and f["split"] == "train" and f["shard_id"] == held_out["shard_id"]
+    )
+    training_id = pq.read_table(release / training["path"], columns=["building_id"])[0][0].as_py()
+    for relative in (held_out["path"], held_out["path"].replace("data/logged/", "data/oracle/", 1)):
+        path = release / relative
+        table = pq.read_table(path)
+        for name, first in (
+            ("building_id", training_id),
+            ("row_id", training_id * config.episode_steps),
+        ):
+            index = table.schema.get_field_index(name)
+            values = table.column(index).to_numpy().copy()
+            values[0] = first
+            table = table.set_column(index, table.schema.field(index), pa.array(values))
+        pq.write_table(table, path)
+    resign(release)
+    validated_manifest(release)
+    with closing(iter_pairs(release, split="test", batch_size=1)) as pairs:
+        with pytest.raises(ValueError, match="building leakage across splits"):
+            next(pairs)
+
+
+def test_occupant_capacity_cannot_change_across_empty_hours(tmp_path):
+    initialize(tmp_path, Config(rows=24, episode_steps=24, seed=0))
+    generate(tmp_path, progress=None)
+    paths = {
+        f["kind"]: tmp_path / f["path"] for f in read_json(tmp_path / "manifest.json")["files"]
+    }
+    logged, oracle = pq.read_table(paths["logged"]), pq.read_table(paths["oracle"])
+    occupancy = logged["occupancy_count"].to_numpy()
+    assert occupancy[0] == occupancy[5] == 5 and occupancy[4] == 0
+    # Keep net thermal forcing, energy and reward unchanged at the modified hour.
+    for table, path, edits in (
+        (logged, paths["logged"], [("occupancy_count", -1)]),
+        (oracle, paths["oracle"], [("internal_heat_kw", -0.12), ("process_heat_kw", 0.12)]),
+    ):
+        for name, delta in edits:
+            index = table.schema.get_field_index(name)
+            values = table.column(index).to_numpy().copy()
+            values[5] += delta
+            table = table.set_column(index, table.schema.field(index), pa.array(values))
+        pq.write_table(table, path)
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="occupant capacity changed"):
+        validate(tmp_path, batch_size=1)
+
+
+def test_nominal_cop_cannot_change_during_outage(tmp_path):
+    initialize(tmp_path, Config(rows=48, episode_steps=24, seed=5))
+    generate(tmp_path, progress=None)
+    for item in read_json(tmp_path / "manifest.json")["files"]:
+        if item["kind"] != "logged":
+            continue
+        logged = pq.read_table(tmp_path / item["path"])
+        outages = np.flatnonzero(~logged["grid_available"].to_numpy())
+        if not len(outages):
+            continue
+        row = int(outages[0])
+        path = tmp_path / item["path"].replace("data/logged/", "data/oracle/", 1)
+        oracle = pq.read_table(path)
+        index = oracle.schema.get_field_index("cop")
+        cop = oracle.column(index).to_numpy().copy()
+        scale = 0.85 if item["split"] == "test_heatwave" else 1.0
+        correction = 0.045 * max(logged["outdoor_temp_c"][row].as_py() - 25, 0)
+        nominal = cop[row] / scale + correction
+        different_nominal = 3.4 if nominal > 3.6 else 3.8
+        cop[row] = scale * (different_nominal - correction)
+        pq.write_table(oracle.set_column(index, oracle.schema.field(index), pa.array(cop)), path)
+        resign(tmp_path)
+        with pytest.raises(ValueError, match="nominal coefficient of performance changed"):
+            validate(tmp_path, batch_size=3)
+        return
+    pytest.fail("deterministic fixture must contain an outage")
+
+
+@pytest.mark.parametrize("name,value", [("price_per_kwh", 0.7), ("carbon_kg_per_kwh", 0.9)])
+def test_tariff_and_carbon_bounds_apply_when_no_energy_is_served(tmp_path, name, value):
+    initialize(tmp_path, Config(rows=48, episode_steps=24, seed=5, exploration=1.0))
+    generate(tmp_path, progress=None)
+    for item in read_json(tmp_path / "manifest.json")["files"]:
+        if item["kind"] != "logged":
+            continue
+        path = tmp_path / item["path"]
+        table = pq.read_table(path)
+        outages = np.flatnonzero(~table["grid_available"].to_numpy())
+        if not len(outages):
+            continue
+        index = table.schema.get_field_index(name)
+        values = table.column(index).to_numpy().copy()
+        values[outages[0]] = value
+        pq.write_table(table.set_column(index, table.schema.field(index), pa.array(values)), path)
+        resign(tmp_path)
+        with pytest.raises(ValueError, match=f"{name} outside its documented range"):
+            validate(tmp_path)
+        return
+    pytest.fail("deterministic fixture must contain an outage")
+
+
+def test_sensor_bias_checks_cumulative_drift_over_the_whole_trajectory(tmp_path):
+    initialize(tmp_path, Config(rows=336, episode_steps=336, seed=2))
+    generate(tmp_path, progress=None)
+    item = next(f for f in read_json(tmp_path / "manifest.json")["files"] if f["kind"] == "oracle")
+    path = tmp_path / item["path"]
+    table = pq.read_table(path)
+    index = table.schema.get_field_index("sensor_bias_c")
+    bias = table.column(index).to_numpy().astype(float)
+    bias += 1e-4 * np.linspace(0, 1, table.num_rows) ** 2
+    pq.write_table(
+        table.set_column(index, table.schema.field(index), pa.array(bias, type=pa.float32())), path
+    )
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="sensor bias is not linear"):
+        validate(tmp_path, batch_size=31)
+
+
+def test_clipped_cop_constrains_nominal_cop_across_batches(tmp_path, monkeypatch):
+    import thermoshift.simulator as simulator
+
+    config = Config(rows=24, episode_steps=24, seed=5)
+    normal = simulator.normal
+    original, _, _ = simulate(config, 0, 1)
+    # The first hot row is an outage. The warming is enough to clip the COP
+    # from the bottom of the nominal range, while this building's COP stays
+    # above the floor. The next hot row genuinely reaches the floor.
+    shift_2 = 70.3 - original["outdoor_temp_c"][2].as_py()
+    shift_3 = 78.0 - original["outdoor_temp_c"][3].as_py() - 0.92 * shift_2
+
+    def hot_weather(ids, seed, stream, step):
+        values = normal(ids, seed, stream, step)
+        if stream == 101:
+            values += {2: shift_2, 3: shift_3}.get(step, 0) / 0.35
+        return values
+
+    with monkeypatch.context() as patch:
+        patch.setattr(simulator, "normal", hot_weather)
+        initialize(tmp_path, config)
+        generate(tmp_path, progress=None)
+    assert validate(tmp_path, batch_size=1)["status"] == "passed"
+    assert original["grid_available"][2].as_py() is False
+    item = next(f for f in read_json(tmp_path / "manifest.json")["files"] if f["kind"] == "oracle")
+    path = tmp_path / item["path"]
+    oracle = pq.read_table(path)
+    index = oracle.schema.get_field_index("cop")
+    cop = oracle.column(index).to_numpy().copy()
+    assert cop[2] > 1.2 and cop[3] == np.float32(1.2)
+    cop[2] = 1.2
+    pq.write_table(oracle.set_column(index, oracle.schema.field(index), pa.array(cop)), path)
+    resign(tmp_path)
+    with pytest.raises(ValueError, match="nominal coefficient of performance changed"):
+        validate(tmp_path, batch_size=1)
+
+
+@pytest.mark.parametrize(
+    "exploration,offsets,message",
+    [
+        (1.0, (1e-7, 1e-7, 1e-7), "probabilities do not sum to 1"),
+        (1e-300, (0, -1e-7, 1e-7), "logging policy equation fails"),
+    ],
+)
+def test_hidden_policy_checks_mass_and_probabilities_at_clipped_demand(
+    tmp_path, exploration, offsets, message
+):
+    initialize(tmp_path, Config(rows=1, seed=0, hidden_confounding=True, exploration=exploration))
+    generate(tmp_path, progress=None)
+    item = next(f for f in read_json(tmp_path / "manifest.json")["files"] if f["kind"] == "logged")
+    path = tmp_path / item["path"]
+    table = pq.read_table(path)
+    action = table["action"][0].as_py()
+    for name, offset in [
+        ("propensity", offsets[action]),
+        *((f"p_action_{a}", offset) for a, offset in enumerate(offsets)),
+    ]:
+        index = table.schema.get_field_index(name)
+        field = table.schema.field(index)
+        value = table.column(index)[0].as_py() + offset
+        table = table.set_column(index, field, pa.array([value], type=field.type))
+    pq.write_table(table, path)
+    resign(tmp_path)
+    with pytest.raises(ValueError, match=message):
+        validate(tmp_path, write_report=False)

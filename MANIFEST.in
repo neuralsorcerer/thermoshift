@@ -7,8 +7,8 @@ recursive-include examples *.py
 recursive-include scripts *.py
 recursive-include tests *.py
 recursive-include notebooks *.ipynb
+prune notebooks/.ipynb_checkpoints
 recursive-include benchmarks *.py *.md
 prune sample_dataset
 prune build
 prune dist
-global-exclude *.py[cod] __pycache__

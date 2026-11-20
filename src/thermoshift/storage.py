@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -27,7 +28,16 @@ from filelock import FileLock
 
 from thermoshift.cards import write_card
 from thermoshift.config import SPLITS, Config, integer
-from thermoshift.filesystem import atomic_json, dataset_path, fsync_directory, read_json, sha256
+from thermoshift.filesystem import (
+    atomic_json,
+    dataset_parquet_paths,
+    dataset_path,
+    fsync_directory,
+    is_redirected,
+    read_json,
+    require_regular_file,
+    sha256,
+)
 from thermoshift.lifecycle import dataset_lock
 from thermoshift.provenance import (
     check_schema_documents,
@@ -47,6 +57,22 @@ from thermoshift.shards import (
 from thermoshift.simulator import simulate
 
 
+def _sync_dataset_root_parents(root: Path) -> None:
+    """Flush the new dataset's path entries on its containing filesystem."""
+    if os.name != "posix":
+        return
+    root = root.resolve()
+    device = root.stat().st_dev
+    for parent in root.parents:
+        if parent.stat().st_dev != device:
+            break
+        try:
+            fsync_directory(parent)
+        except PermissionError:
+            # A caller's parent directory can allow traversal without permitting an open.
+            continue
+
+
 def initialize(root: str | Path, config: Config) -> Config:
     """Initialize an empty directory or reopen a matching generation plan."""
     if not isinstance(config, Config):
@@ -57,17 +83,20 @@ def initialize(root: str | Path, config: Config) -> Config:
         path = dataset_path(root, "run_config.json")
         if path.exists():
             current = load_config(root, check_runtime=True)
-            if current != config:
+            if current.fingerprint != config.fingerprint:
                 raise ValueError(
                     "output contains a different configuration; use a new output directory"
                 )
             check_schema_documents(root, repair_missing=True)
+            # The last schema rename may have succeeded before its directory sync failed.
+            fsync_directory(root)
             return config
         # A process may have died before its first atomic config rename.
         for temporary in root.glob("run_config.json.tmp-*"):
             temporary.unlink()
         if any(p.name != ".lifecycle.lock" for p in root.iterdir()):
             raise ValueError("new dataset output directory must be empty")
+        _sync_dataset_root_parents(root)
         atomic_json(
             path,
             {
@@ -93,20 +122,38 @@ def _worker_initialize():
     pa.set_io_thread_count(1)
 
 
+def _invalidate_release(root: Path) -> None:
+    """Durably clear release certification before changing shard or manifest data."""
+    (root / "validation.json").unlink(missing_ok=True)
+    (root / "_SUCCESS.json").unlink(missing_ok=True)
+    # A different generation rank may have performed the unlinks but not synced yet.
+    fsync_directory(root)
+
+
 def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
     config = Config(**config_dict)
     root = Path(root)
     state = dataset_path(root, "_state")
     state.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    with FileLock(str(dataset_path(root, f"_state/shard-{shard_id:08d}.lock")), timeout=0):
+    lock_path = dataset_path(root, f"_state/shard-{shard_id:08d}.lock")
+    require_regular_file(lock_path, missing_ok=True)
+    with FileLock(str(lock_path), timeout=0):
+        relative_state = state_path(".", shard_id)
+        checkpoint = dataset_path(root, relative_state)
+        require_regular_file(checkpoint, missing_ok=True)
         if shard_complete(root, config, shard_id):
             remove_temporaries(root, shard_id)
+            # A completed checkpoint rename may still be waiting for a directory sync.
+            fsync_directory(state)
             return {
                 "shard_id": shard_id,
                 "status": "resumed",
                 "seconds": time.perf_counter() - started,
             }
+        if checkpoint.exists():
+            checkpoint.unlink()
+            fsync_directory(state)
         writers, totals, temp_paths = {}, {}, {}
         try:
             # ExitStack attempts every close even if writing or a footer close
@@ -124,14 +171,16 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
                         for kind, table in (("logged", logged), ("oracle", oracle)):
                             relative = shard_path(kind, split, shard_id)
                             if relative not in writers:
-                                dataset_path(root, relative).parent.mkdir(
-                                    parents=True, exist_ok=True
-                                )
+                                final = dataset_path(root, relative)
+                                require_regular_file(final, missing_ok=True)
+                                final.parent.mkdir(parents=True, exist_ok=True)
                                 temporary = dataset_path(
                                     root, Path(relative).with_suffix(".parquet.inprogress")
                                 )
+                                # Start with a new inode for an interrupted shard.
+                                temporary.unlink(missing_ok=True)
+                                handle = resources.enter_context(temporary.open("xb"))
                                 temp_paths[relative] = temporary
-                                handle = resources.enter_context(temporary.open("wb"))
                                 writer = pq.ParquetWriter(
                                     handle,
                                     SCHEMAS[kind],
@@ -151,13 +200,13 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
                 raise RuntimeError("generated shard row accounting is inconsistent")
             files = []
             for relative, temporary in sorted(temp_paths.items()):
+                temporary = dataset_path(root, temporary.relative_to(root))
                 with temporary.open("r+b") as handle:
                     os.fsync(handle.fileno())
                 # Re-resolve the destination: nothing guarantees a path stayed
                 # symlink-free between opening the temporary and committing it.
                 final = dataset_path(root, relative)
                 os.replace(temporary, final)
-                fsync_directory(final.parent)
                 files.append(
                     {
                         "path": relative,
@@ -169,8 +218,18 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
                         "shard_id": shard_id,
                     }
                 )
+            # Sync the whole path to each partition, including directory entries
+            # created by other ranks. The root sync also persists the _state entry.
+            directories = {
+                directory
+                for path in temp_paths.values()
+                for directory in path.parents
+                if directory.is_relative_to(root)
+            }
+            for directory in sorted(directories, key=lambda path: -len(path.parts)):
+                fsync_directory(directory)
             atomic_json(
-                dataset_path(root, state_path(".", shard_id)),
+                dataset_path(root, relative_state),
                 {
                     "fingerprint": config.fingerprint,
                     "shard_id": shard_id,
@@ -180,7 +239,12 @@ def _generate_shard_locked(root, config_dict, shard_id, batch_buildings):
             )
         finally:
             for path in temp_paths.values():
-                path.unlink(missing_ok=True)
+                try:
+                    temporary = dataset_path(root, path.relative_to(root))
+                except ValueError:
+                    # A redirected parent no longer names the file we opened.
+                    continue
+                temporary.unlink(missing_ok=True)
     return {"shard_id": shard_id, "status": "written", "seconds": time.perf_counter() - started}
 
 
@@ -205,8 +269,8 @@ def generate(
     with dataset_lock(root, generating=True):
         config = load_config(root, check_runtime=True)
         check_schema_documents(root)
-        (root / "_SUCCESS.json").unlink(missing_ok=True)
-        (root / "validation.json").unlink(missing_ok=True)
+        if rank < config.shards:
+            _invalidate_release(root)
         summary = _generate_locked(
             root, config, workers, batch_buildings, rank, world_size, progress
         )
@@ -221,6 +285,8 @@ def _generate_locked(root, config, workers, batch_buildings, rank, world_size, p
     summary = {"written": 0, "resumed": 0}
     started = time.perf_counter()
     workers = min(workers, len(assigned_shards))
+    if sys.platform == "win32":
+        workers = min(workers, 61)  # ProcessPoolExecutor's Windows limit.
     if workers == 0:
         return {**summary, "seconds": time.perf_counter() - started}
 
@@ -279,18 +345,15 @@ def finalize(root: str | Path) -> dict[str, Any]:
     root = Path(root)
     with dataset_lock(root):
         config = load_config(root, check_runtime=True)
-        check_schema_documents(root)
         # A failed or interrupted attempt must not leave a previous completion
         # marker or scientific report certifying the changed release.
-        (root / "_SUCCESS.json").unlink(missing_ok=True)
-        (root / "validation.json").unlink(missing_ok=True)
-        data = dataset_path(root, "data")
-        if any(path.is_symlink() for path in data.rglob("*")):
-            raise ValueError("symlinks are not allowed under data/")
+        _invalidate_release(root)
+        check_schema_documents(root)
+        actual = dataset_parquet_paths(root)
         # Reject a redirected shard-state directory before trusting its records.
         state = dataset_path(root, "_state")
-        if any(path.is_symlink() for path in state.glob("*")):
-            raise ValueError("symlinks are not allowed under _state/")
+        if state.is_dir() and any(is_redirected(path) for path in state.iterdir()):
+            raise ValueError("symlinks and junctions are not allowed under _state/")
         files = []
         for sid in range(config.shards):
             if not shard_complete(root, config, sid, verify_hash=True):
@@ -298,7 +361,6 @@ def finalize(root: str | Path) -> dict[str, Any]:
             remove_temporaries(root, sid)
             files.extend(read_json(state_path(root, sid))["files"])
         expected = {f["path"] for f in files}
-        actual = {p.relative_to(root).as_posix() for p in data.rglob("*.parquet")}
         if actual != expected:
             raise ValueError("unexpected or missing Parquet files under data/")
         split_rows = {
@@ -307,6 +369,7 @@ def finalize(root: str | Path) -> dict[str, Any]:
         }
         if sum(split_rows.values()) != config.rows:
             raise ValueError("final row count is inconsistent")
+        fsync_directory(state)
         atomic_json(
             root / "manifest.json",
             {
