@@ -171,6 +171,24 @@ def test_hugging_face_local_loading_and_column_projection(tmp_path):
             assert count == read_json(tmp_path / "manifest.json")["split_rows"][split]
 
 
+def test_dataset_card_loading_example_uses_an_available_split(tmp_path):
+    from datasets import load_dataset
+
+    initialize(tmp_path, Config(rows=1, seed=4))
+    generate(tmp_path)
+    card = (tmp_path / "README.md").read_text(encoding="utf-8")
+    metadata = yaml.safe_load(card.split("---")[1])
+    [data_file] = metadata["configs"][0]["data_files"]
+    split = data_file["split"]
+    assert split == "validation"
+    assert f'split="{split}"' in card
+
+    records = load_dataset(
+        str(tmp_path), name="logged", split=split, streaming=True, columns=["row_id"]
+    )
+    assert list(records) == [{"row_id": 0}]
+
+
 def test_corrupt_target_detected_even_with_updated_checksum(tmp_path):
     initialize(tmp_path, Config(rows=501, episode_steps=24))
     generate(tmp_path, progress=None)

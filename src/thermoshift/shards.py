@@ -52,8 +52,6 @@ def shard_complete(
     boolean(verify_hash, "verify_hash")
     try:
         path = dataset_path(root, state_path(".", shard_id))
-        if not path.exists():
-            return False
         doc = read_json(path)
         if (
             doc["fingerprint"] != config.fingerprint

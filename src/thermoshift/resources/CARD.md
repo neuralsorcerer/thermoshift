@@ -29,7 +29,7 @@ from datasets import load_dataset
 records = load_dataset(
     "YOUR_USERNAME/thermoshift",
     name="logged",
-    split="train",
+    split="{example_split}",
     streaming=True,
     columns=["row_id", "building_id", "step", "obs_temp_last_c", "action", "y_next_temp_c"],
 )

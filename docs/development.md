@@ -8,7 +8,7 @@ in the HTML output.
 
 ## Build locally
 
-From the repository root in an activated Python 3.11+ environment:
+From the repository root in an activated Python 3.12+ environment:
 
 ```bash
 python -m pip install -r docs/requirements.txt

@@ -1,18 +1,24 @@
 # Dependency versions for a reproducible development environment.
-numpy==2.3.5
-pyarrow==25.0.1
+numpy==2.3.5; python_version < "3.15"
+numpy==2.5.5; python_version >= "3.15"
+pyarrow==25.0.1; python_version < "3.15"
+pyarrow==26.0.1; python_version >= "3.15"
 filelock==3.32.6
 PyYAML==6.0.3
 huggingface_hub==1.30.0
 datasets==5.0.1
-scikit-learn==1.8.0
-pandas==2.2.3
+scikit-learn==1.8.0; python_version < "3.15"
+scikit-learn==1.9.1; python_version >= "3.15"
+pandas==2.2.3; python_version < "3.14"
+pandas==2.3.3; python_version == "3.14"
+pandas==3.1.1; python_version >= "3.15"
 pytest==9.1.1
 nbformat==5.11.1
 ipykernel==7.3.0
 build==1.6.0
 pre-commit==4.6.2
 portalocker==3.2.0
-scipy==1.17.0
+scipy==1.17.0; python_version < "3.15"
+scipy==1.18.1; python_version >= "3.15"
 ruff==0.16.6
 IPython==9.17.1

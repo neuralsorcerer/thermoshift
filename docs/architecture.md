@@ -58,8 +58,8 @@ for the duration of each write.
 Manifest checks establish expected paths, counts, schemas, sizes, and hashes.
 Paired readers then iterate matching Parquet files in numeric shard order. Record
 checks are grouped by identity, trajectory continuity, logging policy, physical
-parameter domains, and outcomes. Only the final row of the previous batch is kept
-for continuity checks.
+parameter domains, and outcomes. Continuity checks carry the previous row,
+building-parameter references, and feasible sensor-drift bounds across batches.
 
 Validation records a running status before scanning and writes the final result
 atomically. Exact replay regenerates one building at a time. Validation acquires

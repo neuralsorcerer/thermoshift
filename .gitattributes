@@ -1,0 +1,2 @@
+# Preserve the exact bytes bound by the bundled release checksums.
+sample_dataset/** -text

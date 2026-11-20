@@ -8,7 +8,7 @@ dynamic = ["version"]
 authors = [{name = "Soumyadip Sarkar"}]
 description = "Synthetic Cooling Trajectories and Counterfactual Outcomes for Machine Learning"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["synthetic-data", "time-series", "counterfactual", "parquet", "energy"]
@@ -17,25 +17,35 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
 dependencies = [
     "numpy>=2.0,<3",
-    "pyarrow>=19,<26",
+    "pyarrow>=19,<26; python_version < '3.15'",
+    "pyarrow>=26,<27; python_version >= '3.15'",
     "filelock>=3.16,<5",
     "portalocker>=3.2,<4",
-    "PyYAML>=6,<7",
+    "PyYAML>=6.0.1,<7",
 ]
 
 [project.optional-dependencies]
 hub = ["huggingface_hub>=1.30,<2", "datasets>=5,<6"]
-analysis = ["scikit-learn>=1.5,<2", "pandas>=2.2,<3"]
-notebook = ["nbformat>=5.10,<6", "ipykernel>=6,<8", "IPython>=8,<10"]
+analysis = [
+    "scikit-learn>=1.5,<2",
+    "pandas>=2.2,<3; python_version < '3.15'",
+    "pandas>=3.0.6,<4; python_version >= '3.15'",
+]
+notebook = [
+    "nbformat>=5.10,<6",
+    "ipykernel>=6.30.0,<8; python_version < '3.15'",
+    "ipykernel>=7.2.0,<8; python_version >= '3.15'",
+    "IPython>=8,<10",
+]
 dev = [
     "pytest>=8,<10",
     "build>=1.2,<2",
@@ -68,7 +78,7 @@ addopts = "-ra --strict-markers"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP"]

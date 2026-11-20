@@ -18,7 +18,7 @@ from pathlib import Path
 import portalocker
 
 from thermoshift.config import boolean
-from thermoshift.filesystem import dataset_path
+from thermoshift.filesystem import dataset_path, require_regular_file
 
 
 @contextmanager
@@ -28,9 +28,9 @@ def dataset_lock(root, *, generating=False):
     if not root.is_dir():
         raise ValueError("dataset directory does not exist; initialize it first")
     flags = (portalocker.LOCK_SH if generating else portalocker.LOCK_EX) | portalocker.LOCK_NB
-    lock = portalocker.Lock(
-        str(dataset_path(root, ".lifecycle.lock")), mode="a", flags=flags, timeout=0
-    )
+    path = dataset_path(root, ".lifecycle.lock")
+    require_regular_file(path, missing_ok=True)
+    lock = portalocker.Lock(str(path), mode="a", flags=flags, timeout=0)
     try:
         lock.acquire()
     except portalocker.exceptions.LockException as error:

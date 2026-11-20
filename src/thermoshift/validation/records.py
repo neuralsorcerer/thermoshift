@@ -15,8 +15,7 @@ import numpy as np
 import pyarrow as pa
 
 from thermoshift._checks import array, close, require
-from thermoshift.config import SPLITS, Config
-from thermoshift.random import split_codes
+from thermoshift.config import Config
 from thermoshift.reading import _iter_pairs
 from thermoshift.schema import SCHEMAS
 
@@ -32,21 +31,9 @@ def _required_values(x: pa.Table, o: pa.Table) -> None:
                 require(np.isfinite(col.drop_null().to_numpy()), f"nonfinite values: {f.name}")
 
 
-def _identifiers(config: Config, item: dict, x: pa.Table, o: pa.Table) -> None:
-    """Check identity, split membership and time labels."""
-    rid, bid, step = (array(x, k) for k in ("row_id", "building_id", "step"))
-    for name in ("row_id", "building_id", "step"):
-        require(array(x, name) == array(o, name), "logged/oracle join mismatch")
-    low, high = config.bounds(item["shard_id"])
-    require((bid >= low) & (bid < high), "building outside shard interval")
-    require((rid >= 0) & (rid < config.rows), "row ID out of bounds")
-    require((step >= 0) & (step < config.episode_steps), "invalid step")
-    require(rid == bid * config.episode_steps + step, "row ID equation fails")
-    require(np.diff(rid) > 0, "duplicate or unsorted row ID")
-    require(
-        split_codes(bid, config.seed) == SPLITS.index(item["split"]),
-        "building leakage across splits",
-    )
+def _time_labels(config: Config, x: pa.Table) -> None:
+    """Check time labels and episode boundaries for verified row IDs."""
+    rid, step = (array(x, name) for name in ("row_id", "step"))
     require(array(x, "hour") == step % 24, "hour/step mismatch")
     require(
         (array(x, "day_of_week") >= 0) & (array(x, "day_of_week") <= 6), "weekday out of bounds"
@@ -67,7 +54,6 @@ def _trajectory(
     joined_o = pa.concat_tables([previous_o, o]) if previous_o is not None else o
     joined_bid = array(joined_x, "building_id")
     same = np.diff(joined_bid) == 0
-    require(np.diff(array(joined_x, "row_id")) > 0, "duplicate row across batches")
     require(np.diff(array(joined_x, "step"))[same] == 1, "nonconsecutive episode steps")
     require(array(joined_x, "step")[1:][~same] == 0, "episode does not start at step zero")
     require(array(joined_x, "episode_end")[:-1] == ~same, "incorrect episode transition")
@@ -83,24 +69,6 @@ def _trajectory(
     for name in ("conductance_kw_per_c", "capacity_kwh_per_c"):
         v = array(joined_o, name)
         require(v[1:][same] == v[:-1][same], f"building parameter changed: {name}")
-    # Solar gain is the irradiance scaled by a constant per-building aperture, so
-    # the cross-multiplied ratio cannot move within a trajectory. This is the one
-    # check that ties stored irradiance to stored solar heat.
-    irradiance = array(joined_x, "solar_w_m2").astype(float)
-    solar_heat = array(joined_o, "solar_heat_kw").astype(float)
-    close(
-        (solar_heat[1:] * irradiance[:-1])[same],
-        (solar_heat[:-1] * irradiance[1:])[same],
-        "solar aperture changed within a trajectory",
-    )
-    # Sensor bias is affine in the step index, so its second difference vanishes.
-    drift = np.diff(array(joined_o, "sensor_bias_c").astype(float))
-    consecutive = same[1:] & same[:-1]
-    close(
-        drift[1:][consecutive],
-        drift[:-1][consecutive],
-        "sensor bias is not linear in the step index",
-    )
     days = array(joined_x, "day_of_week").astype(int)
     new_day = array(joined_x, "hour")[1:] == 0
     require(days[1:][same] == ((days[:-1] + new_day) % 7)[same], "weekday progression fails")
@@ -125,32 +93,83 @@ def _trajectory(
     require(ages[initial_dropout] == 1, "initial sensor age mismatch")
 
 
+def _building_starts(building):
+    return np.flatnonzero(np.r_[True, building[1:] != building[:-1]])
+
+
+def _intersect_intervals(starts, lower, upper, previous):
+    lower = np.maximum.reduceat(lower, starts)
+    upper = np.minimum.reduceat(upper, starts)
+    if previous is not None:
+        lower[0] = max(lower[0], previous[0])
+        upper[0] = min(upper[0], previous[1])
+    return lower, upper
+
+
+def _sensor_bias(
+    o: pa.Table, previous: tuple[int, float, float, float] | None
+) -> tuple[int, float, float, float]:
+    """Require one feasible drift slope per building within rounding tolerance."""
+    building = array(o, "building_id")
+    step = array(o, "step")
+    bias = array(o, "sensor_bias_c").astype(float)
+    starts = _building_starts(building)
+    initial = bias[starts]
+    continued = previous is not None and building[0] == previous[0]
+    if continued:
+        initial[0] = previous[1]
+    baseline = np.repeat(initial, np.diff(starts, append=len(bias)))
+    # Each row constrains the slope from step zero. Intersect those intervals
+    # across the trajectory so small local deviations cannot accumulate.
+    tolerance = 0.5 * np.finfo(np.float32).eps * (np.abs(bias) + np.abs(baseline)) + 1e-12
+    elapsed = np.maximum(step, 1)
+    lower = np.where(step > 0, (bias - baseline - tolerance) / elapsed, -np.inf)
+    upper = np.where(step > 0, (bias - baseline + tolerance) / elapsed, np.inf)
+    lower, upper = _intersect_intervals(starts, lower, upper, previous[2:] if continued else None)
+    require(lower <= upper, "sensor bias is not linear in the step index")
+    return int(building[-1]), float(initial[-1]), float(lower[-1]), float(upper[-1])
+
+
+def _building_constant(building, values, name, previous, *, rtol=2e-6) -> None:
+    """Compare available observations with each building's first observation."""
+    if not len(values):
+        return
+    starts = _building_starts(building)
+    references = values[starts]
+    earlier = previous.get(name)
+    if earlier is not None and building[0] == earlier[0]:
+        references[0] = earlier[1]
+    require(
+        np.isclose(
+            values, np.repeat(references, np.diff(starts, append=len(values))), atol=0, rtol=rtol
+        ),
+        f"{name} changed within a trajectory",
+    )
+    previous[name] = int(building[-1]), float(references[-1])
+
+
 def _logging(config: Config, x: pa.Table, o: pa.Table) -> None:
     """Check action probabilities and decision-time sensing."""
-    temp = array(o, "true_temp_c")
     action = array(x, "action").astype(int)
     require((action >= 0) & (action < 3), "invalid action")
     probs = np.column_stack([array(x, f"p_action_{a}") for a in range(3)])
-    require((probs >= config.exploration / 3) & (probs <= 1), "positivity violation")
-    close(probs.sum(axis=1), 1, "probabilities do not sum to 1", atol=2e-7)
+    probability_floor = config.exploration / 3
+    require((probs > 0) & (probs >= probability_floor) & (probs <= 1), "positivity violation")
+    epsilon = np.finfo(np.float64).eps
+    require(np.abs(probs.sum(axis=1) - 1) <= 8 * epsilon, "probabilities do not sum to 1")
     require(
         array(x, "propensity") == probs[np.arange(len(action)), action],
         "selected propensity mismatch",
     )
-    policy_temp = array(x, "obs_temp_last_c").astype(float)
+    observed_temp = array(x, "obs_temp_last_c").astype(float)
+    setpoint = array(x, "setpoint_c").astype(float)
+    outdoor_temp = array(x, "outdoor_temp_c").astype(float)
+    policy_temp = observed_temp
     if config.hidden_confounding:
-        policy_temp += 0.8 * (temp - policy_temp)
-    demand = np.clip(
-        (
-            policy_temp
-            - array(x, "setpoint_c").astype(float)
-            + 0.15
-            * (array(x, "outdoor_temp_c").astype(float) - array(x, "setpoint_c").astype(float))
-        )
-        / 3,
-        0,
-        1,
-    )
+        temp = array(o, "true_temp_c").astype(float)
+        policy_temp = observed_temp + 0.8 * (temp - observed_temp)
+    raw_demand = (policy_temp - setpoint + 0.15 * (outdoor_temp - setpoint)) / 3
+    demand = np.clip(raw_demand, 0, 1)
     levels = np.array([0, 0.5, 1])
     logits = (
         -5 * (levels - demand[:, None]) ** 2
@@ -160,13 +179,30 @@ def _logging(config: Config, x: pa.Table, o: pa.Table) -> None:
         * levels
     )
     logits -= logits.max(axis=1, keepdims=True)
-    policy_probs = np.exp(logits)
-    policy_probs /= policy_probs.sum(axis=1, keepdims=True)
-    policy_probs = (1 - config.exploration) * policy_probs + config.exploration / 3
+    softmax = np.exp(logits)
+    softmax /= softmax.sum(axis=1, keepdims=True)
+    policy_probs = (1 - config.exploration) * softmax + probability_floor
+    # NumPy's exponential can round differently across CPU implementations.
+    tolerance = 8 * epsilon * policy_probs
     if config.hidden_confounding:
-        close(probs, policy_probs, "logging policy equation fails", atol=6e-7)
-    else:
-        require(probs == policy_probs, "observable logging policy is not exactly reproducible")
+        # The hidden temperature was used before float32 serialization. Bound
+        # its rounding error, then project the resulting demand interval through
+        # clipping. The derivative of log(softmax) in demand is bounded by 10.
+        single = np.finfo(np.float32)
+        temp_roundoff = 0.5 * (single.eps * np.abs(temp) + float(single.smallest_subnormal))
+        demand_roundoff = (0.8 / 3) * temp_roundoff + 8 * epsilon * (
+            1 + np.abs(temp) + np.abs(observed_temp) + np.abs(setpoint) + np.abs(outdoor_temp)
+        )
+        lower = np.clip(raw_demand - demand_roundoff, 0, 1)
+        upper = np.clip(raw_demand + demand_roundoff, 0, 1)
+        demand_error = np.maximum(demand - lower, upper - demand)
+        tolerance += (1 - config.exploration) * softmax * np.expm1(10 * demand_error[:, None])
+    require(
+        np.abs(probs - policy_probs) <= tolerance,
+        "logging policy equation fails"
+        if config.hidden_confounding
+        else "observable logging policy equation fails",
+    )
     nulls = array(x, "obs_temp_c")
     missing = np.isnan(nulls)
     require(missing == (array(x, "sensor_age_steps") > 0), "sensor null/age mismatch")
@@ -183,10 +219,12 @@ def _logging(config: Config, x: pa.Table, o: pa.Table) -> None:
     )
 
 
-def _domains(x: pa.Table, o: pa.Table) -> None:
+def _domains(x: pa.Table, o: pa.Table, previous: dict) -> None:
     """Check physical parameter domains."""
     for name in ("floor_area_m2", "hvac_capacity_kw", "price_per_kwh", "carbon_kg_per_kwh"):
         require(array(x, name) > 0, f"nonpositive {name}")
+    for name, low, high in (("price_per_kwh", 0.04, 0.65), ("carbon_kg_per_kwh", 0.10, 0.85)):
+        _within(array(x, name).astype(float), low, high, f"{name} outside its documented range")
     for name in ("conductance_kw_per_c", "capacity_kwh_per_c", "cop", "base_load_kw"):
         require(array(o, name) > 0, f"nonpositive {name}")
     for name in ("internal_heat_kw", "solar_heat_kw"):
@@ -209,9 +247,7 @@ def _domains(x: pa.Table, o: pa.Table) -> None:
         & (irradiance[lit] <= 900 * shape[lit] * (1 + 1e-6)),
         "irradiance outside its daylight envelope",
     )
-    _distributions(
-        x, o, area=array(x, "floor_area_m2").astype(float), irradiance=irradiance, lit=lit
-    )
+    _distributions(x, o, irradiance, lit, previous)
 
 
 def _within(values, low, high, message):
@@ -219,21 +255,16 @@ def _within(values, low, high, message):
     require((values > low * (1 - 1e-6)) & (values < high * (1 + 1e-6)), message)
 
 
-def _distributions(x: pa.Table, o: pa.Table, area, irradiance, lit) -> None:
-    """Check the per-building draws the model reference documents.
-
-    These are the only checks that look at where a parameter came from rather
-    than how the stored columns relate. Every equation elsewhere is satisfied by
-    a release generated from a different set of distributions, so without these
-    a changed building population validates cleanly.
-    """
+def _distributions(x: pa.Table, o: pa.Table, irradiance, lit, previous) -> None:
+    """Check documented ranges and constant building parameters."""
+    building = array(x, "building_id")
+    area = array(x, "floor_area_m2").astype(float)
     _within(area, 50, 300, "floor area outside its documented range")
     _within(array(x, "setpoint_c").astype(float), 23, 25, "setpoint outside its documented range")
     for name, table, low, high in (
         ("conductance_kw_per_c", o, 0.0025 * 0.65, 0.0025 * 1.35),
         ("capacity_kwh_per_c", o, 0.040 * 0.70, 0.040 * 1.30),
         ("hvac_capacity_kw", x, 0.025 * 0.80, 0.025 * 1.20),
-        ("base_load_kw", o, 0.003 * 0.35, 0.003 * 1.00),
     ):
         _within(
             array(table, name).astype(float) / area,
@@ -241,32 +272,62 @@ def _distributions(x: pa.Table, o: pa.Table, area, irradiance, lit) -> None:
             high,
             f"{name} outside its documented share of floor area",
         )
-    if lit.any():
-        # Solar heat is irradiance/1000 times the aperture, so the aperture is
-        # recoverable wherever the sun is up.
-        aperture = array(o, "solar_heat_kw").astype(float)[lit] * 1000 / irradiance[lit]
-        _within(
-            aperture / area[lit], 0.035, 0.100, "solar aperture outside its share of floor area"
-        )
+    solar_heat = array(o, "solar_heat_kw").astype(float)
+    require(solar_heat[~lit] == 0, "nonzero solar heat without irradiance")
+    aperture = solar_heat[lit] * 1000 / irradiance[lit]
+    _within(aperture / area[lit], 0.035, 0.100, "solar aperture outside its share of floor area")
+    _building_constant(building[lit], aperture, "solar aperture", previous)
     # Occupancy is a draw from the building's capacity, or zero.
+    occupancy = array(x, "occupancy_count")
+    occupied = occupancy > 0
     require(
-        array(x, "occupancy_count") <= 1 + np.floor(area / 35 + 1e-6),
+        occupancy <= 1 + np.floor(area / 35 + 1e-6),
         "occupancy above the building's capacity",
     )
-    # Actual COP is the nominal draw reduced by 0.045 per degree above 25, then
-    # clipped and, in the heatwave split, scaled by 0.85. Dividing by that scale
-    # on one side and not the other brackets the nominal draw without needing to
-    # know which split the row came from.
-    excess = np.maximum(array(x, "outdoor_temp_c").astype(float) - 25, 0)
-    cop = array(o, "cop").astype(float)
+    _building_constant(
+        building[occupied], occupancy[occupied], "occupant capacity", previous, rtol=0
+    )
+    base_load_per_area = array(o, "base_load_kw").astype(float) / area
     require(
-        cop / 0.85 + 0.045 * excess > 3.2 * (1 - 1e-6),
+        np.isclose(
+            base_load_per_area,
+            0.003 * np.where(occupied, 1.0, 0.35),
+            atol=0,
+            rtol=2e-6,
+        ),
+        "base_load_kw outside its documented value for the occupancy state",
+    )
+
+
+def _cop_bounds(
+    x: pa.Table, o: pa.Table, split: str, previous: tuple[int, float, float] | None
+) -> tuple[int, float, float]:
+    """Require one feasible nominal COP across every row of each building."""
+    # Actual COP is the nominal draw reduced by 0.045 per degree above 25, then
+    # clipped and, in the heatwave split, scaled by 0.85.
+    correction = 0.045 * np.maximum(array(x, "outdoor_temp_c").astype(float) - 25, 0)
+    cop = array(o, "cop").astype(float) / (0.85 if split == "test_heatwave" else 1.0)
+    require(
+        cop >= np.clip(3.2 - correction, 1.2, 5) * (1 - 1e-6),
         "coefficient of performance below its nominal range",
     )
     require(
-        cop + 0.045 * excess < 4.0 * (1 + 1e-6),
+        cop <= np.clip(4.0 - correction, 1.2, 5) * (1 + 1e-6),
         "coefficient of performance above its nominal range",
     )
+    # At the floor, the nominal COP has an upper bound. Above the floor it
+    # is recoverable within serialization tolerance for COP and outdoor temp.
+    tolerance = 4e-6
+    nominal = cop + correction
+    lower = np.where(cop > 1.2 + tolerance, nominal - tolerance, 3.2 - tolerance)
+    upper = np.minimum(nominal + tolerance, 4.0 + tolerance)
+    building = array(x, "building_id")
+    continued = previous is not None and building[0] == previous[0]
+    lower, upper = _intersect_intervals(
+        _building_starts(building), lower, upper, previous[1:] if continued else None
+    )
+    require(lower <= upper, "nominal coefficient of performance changed within a trajectory")
+    return int(building[-1]), float(lower[-1]), float(upper[-1])
 
 
 def _outcomes(config: Config, x: pa.Table, o: pa.Table) -> None:
@@ -275,7 +336,9 @@ def _outcomes(config: Config, x: pa.Table, o: pa.Table) -> None:
     temp = array(o, "true_temp_c")
     cf = {}
     for name in ("next_temp_c", "energy_kwh", "cost", "carbon_kg", "discomfort_c", "reward"):
-        cf[name] = np.column_stack([array(o, f"cf_{name}_{a}") for a in range(3)])
+        # Evaluate differences and products in float64 so even malformed finite
+        # float32 inputs reach the intended failed assertion without overflow.
+        cf[name] = np.column_stack([array(o, f"cf_{name}_{a}") for a in range(3)]).astype(float)
         require(
             array(x, f"y_{name}") == cf[name][np.arange(len(action)), action],
             f"factual/counterfactual mismatch: {name}",
@@ -286,16 +349,25 @@ def _outcomes(config: Config, x: pa.Table, o: pa.Table) -> None:
     require(np.diff(cf["next_temp_c"], axis=1) <= 1e-5, "more cooling increased temperature")
     require(np.diff(cf["energy_kwh"], axis=1) >= -1e-6, "energy not monotone in cooling input")
     grid = array(x, "grid_available")
+    outage = ~grid
     for name, potential in cf.items():
-        require(potential[~grid] == potential[~grid, :1], f"outage branches differ: {name}")
-    require(cf["energy_kwh"][~grid] == 0, "outage has served energy")
+        require(potential[outage] == potential[outage, :1], f"outage branches differ: {name}")
+    require(cf["energy_kwh"][outage] == 0, "outage has served energy")
+    require(cf["cost"][outage] == 0, "outage has electricity cost")
+    require(cf["carbon_kg"][outage] == 0, "outage has grid emissions")
     level = np.array([0, 0.5, 1])
     expected_energy = grid[:, None] * (
         array(o, "base_load_kw")[:, None] + array(x, "hvac_capacity_kw")[:, None] * level
     )
+    internal_heat = array(o, "internal_heat_kw")
+    occupancy = array(x, "occupancy_count")
+    require(
+        internal_heat[outage & (occupancy == 0)] == 0,
+        "empty building has internal heat during outage",
+    )
     close(
-        array(o, "internal_heat_kw"),
-        0.12 * array(x, "occupancy_count") + grid * array(o, "base_load_kw"),
+        internal_heat,
+        0.12 * occupancy + grid * array(o, "base_load_kw"),
         "background heat accounting fails",
     )
     close(cf["energy_kwh"], expected_energy, "electrical accounting fails")
@@ -360,16 +432,21 @@ def scan_records(root: Path, config: Config, manifest: dict, batch_size: int) ->
         }
     )
     previous_path, previous_x, previous_o = None, None, None
-    for item, x, o in _iter_pairs(root, manifest, batch_size=batch_size):
+    previous_bias, previous_cop, previous_constants = None, None, {}
+    for item, x, o in _iter_pairs(root, manifest, batch_size=batch_size, config=config):
         if previous_path != item["path"]:
             if previous_x is not None:
                 require(array(previous_x, "episode_end")[0], "file ends inside an episode")
             previous_x, previous_o, previous_path = None, None, item["path"]
+            previous_bias, previous_cop = None, None
+            previous_constants.clear()
         _required_values(x, o)
-        _identifiers(config, item, x, o)
+        _time_labels(config, x)
         _trajectory(x, o, previous_x, previous_o)
+        previous_bias = _sensor_bias(o, previous_bias)
         _logging(config, x, o)
-        _domains(x, o)
+        _domains(x, o, previous_constants)
+        previous_cop = _cop_bounds(x, o, item["split"], previous_cop)
         _outcomes(config, x, o)
         previous_x, previous_o = x.slice(x.num_rows - 1), o.slice(o.num_rows - 1)
         action = array(x, "action").astype(int)

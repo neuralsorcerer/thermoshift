@@ -15,10 +15,10 @@ command. The package version is defined once in `src/thermoshift/_version.py`.
 ## Check a change
 
 ```bash
-python -m ruff check src tests examples scripts benchmarks docs
-python -m ruff format --check src tests examples scripts benchmarks docs
+python -m ruff check src tests examples scripts benchmarks docs notebooks
+python -m ruff format --check src tests examples scripts benchmarks docs notebooks
 python scripts/update_schema.py --check
-python -m pytest
+python -m pytest -W error
 ```
 
 The `dev` extra also installs pre-commit. Run the fast, file-aware checks
@@ -86,7 +86,7 @@ The workflows in [.github/workflows](.github/workflows) separate the checks:
 
 | Workflow | Checks |
 | --- | --- |
-| `ubuntu.yml`, `macos.yml`, `windows.yml` | Python 3.11–3.14 tests, dependency consistency, wheel/source builds, installed-wheel generation and exact replay |
+| `ubuntu.yml`, `macos.yml`, `windows.yml` | Python 3.12–3.15 tests with warnings treated as errors, dependency consistency, wheel/source builds, installed-wheel generation and exact replay |
 | `lint.yml` | Ruff lint, import ordering, and formatting |
 | `docs.yml` | Strict Sphinx HTML build, generated schema reference, notebook execution with the bundled sample and a fresh 50,003-decision release, and GitHub Pages deployment from main |
 | `codeql.yml` | Python and GitHub Actions security analysis on pushes, pull requests, and a weekly schedule |

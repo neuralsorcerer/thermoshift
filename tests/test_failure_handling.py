@@ -108,6 +108,19 @@ def test_invalid_progress_preserves_completion(release):
     assert (release / "_SUCCESS.json").read_bytes() == marker
 
 
+def test_generation_rank_with_no_shards_preserves_completion(release):
+    validate(release)
+    marker = release / "_SUCCESS.json"
+    report = release / "validation.json"
+    before = marker.read_bytes(), report.read_bytes()
+    shards = load_config(release).shards
+
+    result = generate(release, rank=shards, world_size=shards + 1)
+
+    assert result["written"] == result["resumed"] == 0
+    assert (marker.read_bytes(), report.read_bytes()) == before
+
+
 @pytest.mark.parametrize("write_report", [True, False])
 def test_failed_validation_never_leaves_stale_success_unless_explicitly_readonly(
     release, write_report
@@ -599,6 +612,119 @@ def test_failure_between_parquet_commit_and_shard_state_is_recoverable(tmp_path,
     assert validate(tmp_path, replay=True)["status"] == "passed"
 
 
+@pytest.mark.parametrize("operation", ["resume", "finalize"])
+def test_shard_checkpoint_directory_is_resynced_after_failed_sync(tmp_path, monkeypatch, operation):
+    from thermoshift import filesystem, storage
+
+    root = tmp_path.resolve()
+    config = Config(rows=8, episode_steps=8)
+    initialize(root, config)
+    real_sync = filesystem.fsync_directory
+    state = root / "_state"
+
+    def fail_state_sync(path):
+        if Path(path) == state:
+            raise OSError("injected checkpoint directory sync failure")
+        real_sync(path)
+
+    def recover():
+        if operation == "resume":
+            assert generate(root, world_size=2)["resumed"] == 1
+        else:
+            assert finalize(root)["complete"]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(filesystem, "fsync_directory", fail_state_sync)
+        patch.setattr(storage, "fsync_directory", fail_state_sync)
+        with pytest.raises(OSError, match="injected checkpoint directory"):
+            generate(root, world_size=2)
+        assert shard_complete(root, config, 0)
+        with pytest.raises(OSError, match="injected checkpoint directory"):
+            recover()
+
+    recover()
+
+
+def test_rebuild_clears_old_checkpoint_before_replacing_partitions(release, monkeypatch):
+    from thermoshift import storage
+
+    item = read_json(release / "manifest.json")["files"][0]
+    (release / item["path"]).write_bytes(b"force rebuilding one shard")
+    checkpoint = release / "_state" / f"shard-{item['shard_id']:08d}.json"
+    real_replace = storage.os.replace
+
+    def replace(source, destination):
+        if Path(destination).suffix == ".parquet":
+            assert not checkpoint.exists()
+            raise OSError("injected partition rename failure")
+        real_replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.os, "replace", replace)
+        with pytest.raises(OSError, match="injected partition rename failure"):
+            generate(release)
+
+    assert generate(release)["written"] == 1
+    assert validate(release)["status"] == "passed"
+
+
+def test_shard_commit_flushes_partition_directories_before_checkpoint(tmp_path, monkeypatch):
+    from thermoshift import storage
+
+    root = tmp_path.resolve()
+    initialize(root, Config(rows=8, episode_steps=8))
+    real_sync = storage.fsync_directory
+    real_atomic = storage.atomic_json
+    writes = []
+
+    def sync(path):
+        writes.append(path)
+        real_sync(path)
+
+    def record(path, value):
+        if path.parent.name == "_state":
+            positions = {directory: index for index, directory in enumerate(writes)}
+            for file in value["files"]:
+                chain = [
+                    parent
+                    for parent in (root / file["path"]).parents
+                    if parent.is_relative_to(root)
+                ]
+                order = [positions[directory] for directory in chain]
+                assert order == sorted(order)
+        real_atomic(path, value)
+
+    monkeypatch.setattr(storage, "fsync_directory", sync)
+    monkeypatch.setattr(storage, "atomic_json", record)
+    assert generate(root, world_size=2)["written"] == 1
+    assert (root / "_state/shard-00000000.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "operation,step", [(generate, "_generate_locked"), (finalize, "dataset_parquet_paths")]
+)
+def test_release_invalidation_is_flushed_before_continuing(release, monkeypatch, operation, step):
+    from thermoshift import storage
+
+    validate(release)
+    root = release.resolve()
+    synced = []
+
+    def sync(path):
+        assert not (root / "_SUCCESS.json").exists()
+        assert not (root / "validation.json").exists()
+        synced.append(path.resolve())
+
+    def abort(*args, **kwargs):
+        assert synced == [root]
+        raise OSError("injected failure after invalidation")
+
+    monkeypatch.setattr(storage, "fsync_directory", sync)
+    monkeypatch.setattr(storage, step, abort)
+    with pytest.raises(OSError, match="injected failure after invalidation"):
+        operation(release)
+
+
 def test_resume_rejects_checkpoint_with_invalid_parquet_schema(release):
     config = load_config(release)
     item = read_json(release / "manifest.json")["files"][0]
@@ -628,6 +754,38 @@ def test_verified_resume_removes_only_known_shard_temporaries(release):
     unrelated.write_bytes(b"owned by another program")
     generate(release, batch_buildings=7, progress=None)
     assert not temporary.exists() and unrelated.is_file()
+
+
+def test_windows_generation_limits_process_pool_size(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    from thermoshift import storage
+
+    submitted = []
+
+    class ImmediatePool:
+        def __init__(self, *, max_workers, **kwargs):
+            assert max_workers == 61
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *details):
+            return False
+
+        def submit(self, fn, root, config, shard_id, batch_buildings):
+            submitted.append(shard_id)
+            future = Future()
+            future.set_result({"status": "written"})
+            return future
+
+    config = Config(rows=260, episode_steps=2, shard_buildings=1)
+    initialize(tmp_path, config)
+    monkeypatch.setattr(storage.sys, "platform", "win32")
+    monkeypatch.setattr(storage, "ProcessPoolExecutor", ImmediatePool)
+    result = generate(tmp_path, workers=100, rank=0, world_size=2)
+    assert submitted == list(range(0, config.shards, 2))
+    assert result["written"] == 65
 
 
 def test_worker_death_is_reported_with_a_remedy(tmp_path, monkeypatch):
@@ -759,22 +917,58 @@ def test_dataset_paths_cannot_escape_the_release_directory(tmp_path, relative):
         dataset_path(tmp_path, relative)
 
 
-def test_junctions_are_refused_like_symlinks(tmp_path, monkeypatch):
-    # A Windows junction redirects like a symlink but is_symlink() does not
-    # report one, so the guard asks os.path.isjunction as well. That returns
-    # False off Windows, so drive the detector directly to prove the wiring:
-    # no CI platform here can create a junction.
+def test_windows_dataset_paths_reject_a_drive_component(monkeypatch):
+    from pathlib import PureWindowsPath
+
     from thermoshift import filesystem
 
-    target = tmp_path / "data" / "logged"
-    target.mkdir(parents=True)
-    assert filesystem.dataset_path(tmp_path, "data/logged").is_dir()
+    monkeypatch.setattr(filesystem, "Path", PureWindowsPath)
+    with pytest.raises(ValueError, match="must be relative to the dataset directory"):
+        filesystem.dataset_path("X:/release", "data/C:file.parquet")
 
-    monkeypatch.setattr(filesystem, "_isjunction", lambda path: Path(path) == target)
+
+def test_junctions_are_refused_like_symlinks(release, monkeypatch):
+    from types import SimpleNamespace
+
+    from thermoshift import filesystem
+
+    target = release / "data" / "redirected"
+    target.mkdir()
+    junction_tag = 0xA0000003
+    real_lstat = Path.lstat
+
+    def lstat(path):
+        info = real_lstat(path)
+        if path == target:
+            return SimpleNamespace(st_mode=info.st_mode, st_reparse_tag=junction_tag)
+        return info
+
+    monkeypatch.setattr(filesystem, "_JUNCTION_TAG", junction_tag)
+    monkeypatch.setattr(Path, "lstat", lstat)
     with pytest.raises(ValueError, match="symlinks and junctions are not allowed"):
-        filesystem.dataset_path(tmp_path, "data/logged/train/part-0.parquet")
-    # Siblings of the junction stay usable.
-    assert filesystem.dataset_path(tmp_path, "data/oracle").name == "oracle"
+        filesystem.dataset_path(release, "data/redirected/file.parquet")
+    assert filesystem.dataset_path(release, "data/oracle").is_dir()
+    for operation in (validated_manifest, finalize):
+        with pytest.raises(ValueError, match="symlinks and junctions are not allowed under data/"):
+            operation(release)
+
+
+def test_data_inventory_does_not_ignore_unreadable_directories(release, monkeypatch):
+    import os
+
+    blocked = release / "data" / "unreadable"
+    blocked.mkdir()
+    real_scandir = os.scandir
+
+    def scandir(path):
+        if not isinstance(path, int) and Path(path) == blocked:
+            raise PermissionError("injected data directory permission error")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    for operation in (validated_manifest, finalize):
+        with pytest.raises(PermissionError, match="injected data directory"):
+            operation(release)
 
 
 def test_initialization_removes_a_stale_config_temporary_but_not_foreign_files(tmp_path):
@@ -824,6 +1018,68 @@ def test_initialization_type_error_precedes_filesystem_mutation(tmp_path):
     assert not root.exists()
 
 
+def test_initialization_flushes_new_parent_entries_before_committing_plan(tmp_path, monkeypatch):
+    import os
+
+    from thermoshift import storage
+
+    root = tmp_path.resolve() / "new-parent" / "release"
+    config = Config(rows=1)
+    synced = []
+    real_sync = storage.fsync_directory
+
+    def sync(path):
+        assert not (root / "run_config.json").exists()
+        synced.append(path)
+        real_sync(path)
+
+    monkeypatch.setattr(storage, "fsync_directory", sync)
+    initialize(root, config)
+    assert synced[:2] == ([root.parent, root.parent.parent] if os.name == "posix" else [])
+    assert load_config(root) == config
+
+
+def test_reopening_a_plan_retries_the_final_schema_directory_sync(tmp_path, monkeypatch):
+    from thermoshift import filesystem, storage
+
+    root = tmp_path.resolve()
+    config = Config(rows=1)
+    real_sync = filesystem.fsync_directory
+
+    def fail_final_schema_sync(path):
+        if Path(path) == root and (root / "feature_roles.json").is_file():
+            raise OSError("injected schema directory sync failure")
+        real_sync(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(filesystem, "fsync_directory", fail_final_schema_sync)
+        patch.setattr(storage, "fsync_directory", fail_final_schema_sync)
+        with pytest.raises(OSError, match="injected schema directory"):
+            initialize(root, config)
+        assert (root / "feature_roles.json").is_file()
+        with pytest.raises(OSError, match="injected schema directory"):
+            initialize(root, config)
+
+    assert initialize(root, config) == config
+
+
+def test_initialization_reopen_requires_matching_fingerprint(tmp_path):
+    original = Config(rows=1, comfort_weight=-0.0)
+    initialize(tmp_path, original)
+    with pytest.raises(ValueError, match="different configuration"):
+        initialize(tmp_path, Config(rows=1, comfort_weight=0.0))
+    assert load_config(tmp_path).fingerprint == original.fingerprint
+
+
+def test_schema_documents_require_json_booleans(release):
+    path = release / "schema.json"
+    schema = read_json(path)
+    schema["logged"][0]["nullable"] = 0
+    atomic_json(path, schema)
+    with pytest.raises(ValueError, match="schema.json differs"):
+        check_schema_documents(release)
+
+
 @pytest.mark.parametrize("directory", ["data", "partition", "_state"])
 def test_generation_never_writes_through_symlinked_directories(release, directory):
     item = read_json(release / "manifest.json")["files"][0]
@@ -852,6 +1108,48 @@ def test_generation_never_overwrites_a_symlinked_temporary(release):
     assert temporary.is_symlink()
 
 
+def test_generation_recreates_stale_temporary_without_overwriting_its_inode(release):
+    item = read_json(release / "manifest.json")["files"][0]
+    path = release / item["path"]
+    path.write_bytes(b"corrupt shard forces a rebuild")
+    original = release / "old-temporary"
+    original.write_bytes(b"abandoned contents")
+    temporary = path.with_suffix(".parquet.inprogress")
+    temporary.hardlink_to(original)
+
+    assert generate(release)["written"] == 1
+    assert original.read_bytes() == b"abandoned contents"
+    assert not temporary.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_path,reason",
+    [
+        ("symlink", "symlinks and junctions are not allowed"),
+        ("directory", "expected a regular file"),
+    ],
+)
+def test_generation_checks_shard_state_path_before_rebuilding(
+    release, monkeypatch, invalid_path, reason
+):
+    from thermoshift import storage
+
+    record = release / "_state/shard-00000000.json"
+    original = release / "original-checkpoint.json"
+    record.rename(original)
+    if invalid_path == "symlink":
+        record.symlink_to(original)
+    else:
+        record.mkdir()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("shard simulation must not start with an invalid checkpoint path")
+
+    monkeypatch.setattr(storage, "simulate", forbidden)
+    with pytest.raises(ValueError, match=reason):
+        generate(release)
+
+
 @pytest.mark.parametrize("relative", [".lifecycle.lock", "_state/shard-00000000.lock"])
 def test_generation_rejects_symlinked_locks(release, relative):
     external = release / "unrelated-lock"
@@ -865,7 +1163,25 @@ def test_generation_rejects_symlinked_locks(release, relative):
 
 
 @pytest.mark.parametrize(
-    "failure", ["extra_file", "symlink", "state_symlink", "incomplete_shard", "card_write"]
+    "relative,operation",
+    [
+        (".lifecycle.lock", generate),
+        ("_state/shard-00000000.lock", generate),
+        ("run_config.json", generate),
+        ("README.md", validated_manifest),
+    ],
+)
+def test_release_metadata_and_locks_must_be_regular_files(release, relative, operation):
+    path = release / relative
+    path.unlink(missing_ok=True)
+    path.mkdir()
+    with pytest.raises(ValueError, match="expected a regular file"):
+        operation(release)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["extra_file", "symlink", "state_symlink", "incomplete_shard", "card_write", "bad_schema"],
 )
 def test_failed_refinalization_clears_old_completion_and_validation(release, monkeypatch, failure):
     from thermoshift import storage
@@ -884,13 +1200,15 @@ def test_failed_refinalization_clears_old_completion_and_validation(release, mon
         record.symlink_to(moved)
     elif failure == "incomplete_shard":
         (release / "_state/shard-00000000.json").unlink()
+    elif failure == "bad_schema":
+        atomic_json(release / "schema.json", {})
     else:
 
         def fail_card(*args, **kwargs):
             raise ValueError("injected card write failure")
 
         monkeypatch.setattr(storage, "write_card", fail_card)
-    expected = "symlinks are not allowed under _state/" if failure == "state_symlink" else None
+    expected = "are not allowed under _state/" if failure == "state_symlink" else None
     with pytest.raises(ValueError, match=expected):
         finalize(release)
     assert not (release / "_SUCCESS.json").exists()
@@ -974,5 +1292,16 @@ def test_malformed_shard_state_is_never_resumed(release, field):
         del state["files"][0]["sha256"]
     atomic_json(path, state)
     assert not shard_complete(release, load_config(release), 0, verify_hash=False)
+    assert generate(release)["written"] == 1
+    assert validate(release, replay=True)["status"] == "passed"
+
+
+def test_overly_nested_shard_state_is_regenerated(release):
+    import sys
+
+    path = release / "_state/shard-00000000.json"
+    depth = sys.getrecursionlimit() + 1
+    path.write_text("[" * depth + "0" + "]" * depth, encoding="utf-8")
+    assert not shard_complete(release, load_config(release), 0)
     assert generate(release)["written"] == 1
     assert validate(release, replay=True)["status"] == "passed"

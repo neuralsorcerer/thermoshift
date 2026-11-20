@@ -24,7 +24,7 @@ python -m thermoshift publish output/demo \
 
 Replace `YOUR_USERNAME` with your Hugging Face namespace. The plan includes record
 counts, compressed bytes, file patterns, visibility, branch, and publication steps.
-A dry run performs full local validation and returns before constructing a Hub client.
+A dry run validates the release in memory and returns before constructing a Hub client.
 
 ## Publish
 
@@ -53,16 +53,17 @@ and license. Local generation locks and shard-state files stay local.
 
 Repeat the same command to retry an interrupted upload. The local output and
 remote publication intent bind the exact manifest, metadata, repository, branch,
-and visibility. Use a separate output directory and a fresh repository or suitable
-branch for a different release.
+and visibility. The local binding also records the Hub endpoint. Use a separate
+output directory and a fresh repository or suitable branch for a different release.
 
 The publisher records provenance, uploads the payload, and verifies remote file
 sizes and Git/LFS checksums at the returned immutable commit. It writes the
-completion marker after verification. Parent-commit guards detect intervening
-branch changes. Keep other writers away from the branch during publication.
+completion marker after verification. Parent-commit guards protect the provenance,
+first payload, and completion-marker commits. Keep other writers away from the
+branch during publication, since a large payload can span several commits.
 Republishing clears any previous completion marker in the guarded provenance
-commit before uploading payload files. A failed retry therefore leaves the branch
-unmarked; previously completed immutable commit URLs remain available.
+commit before uploading payload files. An interrupted payload upload leaves the
+branch unmarked, and previously completed immutable commit URLs remain available.
 
 | Error | Resolution |
 | --- | --- |

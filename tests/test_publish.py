@@ -9,6 +9,7 @@
 import fnmatch
 import hashlib
 import inspect
+from base64 import b64encode
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,9 +37,12 @@ class MemoryHub:
 
     def __init__(self, cache):
         self.cache = cache
+        self.endpoint = "https://huggingface.co"
+        self.headers = None
         self.private = False
         self.head = "initial"
         self.trees = {self.head: {".gitattributes": b""}}
+        self.branches = ["main"]
         self.calls = []
         self.skip = None
         self.corrupt = None
@@ -53,6 +57,14 @@ class MemoryHub:
     def repo_info(self, **kw):
         self.check("repo_info", kw)
         return SimpleNamespace(private=self.private, sha=self.head)
+
+    def list_repo_refs(self, **kw):
+        self.check("list_repo_refs", kw)
+        return SimpleNamespace(
+            branches=[
+                SimpleNamespace(name=name, ref=f"refs/heads/{name}") for name in self.branches
+            ]
+        )
 
     def list_repo_files(self, **kw):
         self.check("list_repo_files", kw)
@@ -129,8 +141,25 @@ class MemoryHub:
             result.append(RepoFile(**props))
         return result
 
-    def download(self, repo_id, filename, *, repo_type, revision):
-        path = self.cache / revision / filename
+    def hf_hub_download(
+        self, repo_id, filename, *, repo_type, revision, local_dir=None, force_download=False
+    ):
+        self.check(
+            "hf_hub_download",
+            {
+                "repo_id": repo_id,
+                "filename": filename,
+                "repo_type": repo_type,
+                "revision": revision,
+                "local_dir": local_dir,
+                "force_download": force_download,
+            },
+        )
+        cached = self.cache / revision / filename
+        # A forced download can still return an existing snapshot pointer.
+        if cached.exists() and (local_dir is None or not force_download):
+            return str(cached)
+        path = Path(local_dir) / filename if local_dir is not None else cached
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.trees[revision][filename])
         return str(path)
@@ -142,20 +171,24 @@ def hub(tmp_path, monkeypatch):
 
     service = MemoryHub(tmp_path / "cache")
     monkeypatch.setattr(huggingface_hub, "HfApi", lambda: service)
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", service.download)
     return service
 
 
-def test_dry_run_never_creates_a_hub_client(release, monkeypatch):
+@pytest.mark.parametrize("saved_report", [None, b'{"replay": true}\n'])
+def test_dry_run_validates_in_memory_without_a_hub_client(release, monkeypatch, saved_report):
     import huggingface_hub
 
     def forbidden(*args, **kwargs):
         raise AssertionError("network client constructed during dry-run")
 
     monkeypatch.setattr(huggingface_hub, "HfApi", forbidden)
+    report = release / "validation.json"
+    if saved_report is not None:
+        report.write_bytes(saved_report)
     plan = publish(release, "unit-test/release", public=True, dry_run=True)
     assert plan["decision_rows"] == 1000 and plan["visibility"] == "public"
     assert plan["dry_run"] is True
+    assert (report.read_bytes() if report.exists() else None) == saved_report
     assert not (release / "_state/hub_binding.json").exists()
 
 
@@ -191,6 +224,38 @@ def test_partial_upload_resumes_with_same_intent(release, hub):
     hub.fail_payload = False
     publish(release, "unit-test/release", public=True)
     assert "_SUCCESS.json" in hub.trees[hub.head]
+
+
+def test_resume_uses_verified_head_when_provenance_commit_would_be_unchanged(
+    release, hub, monkeypatch
+):
+    hub.fail_payload = True
+    with pytest.raises(OSError, match="interrupted"):
+        publish(release, "unit-test/release", public=True)
+    hub.fail_payload = False
+
+    verified_head = hub.head
+    upload = hub.upload_folder
+
+    def move_branch():
+        return hub.commit(verified_head, {"_PUBLICATION.json": b"{}"})
+
+    def skipped_commit(**kwargs):
+        # The SDK detects identical additions before a concurrent branch move.
+        # It skips the guarded HTTP commit and returns the updated branch head.
+        return move_branch()
+
+    def upload_after_branch_move(**kwargs):
+        if hub.head == verified_head:
+            move_branch()
+        return upload(**kwargs)
+
+    monkeypatch.setattr(hub, "create_commit", skipped_commit)
+    monkeypatch.setattr(hub, "upload_folder", upload_after_branch_move)
+    with pytest.raises(ValueError, match="parent commit conflict"):
+        publish(release, "unit-test/release", public=True)
+    assert hub.trees[hub.head]["_PUBLICATION.json"] == b"{}"
+    assert "_SUCCESS.json" not in hub.trees[hub.head]
 
 
 @pytest.mark.parametrize("failure", ["fail_payload", "corrupt", "race_before_marker"])
@@ -261,11 +326,67 @@ def test_visibility_and_target_binding_not_silently_changed(release, hub):
         publish(release, "unit-test/another", public=True)
 
 
+@pytest.mark.parametrize(
+    "endpoint, auth",
+    [
+        ("https://hf.example.test/", None),
+        ("https://username:p%40ss@hf.example.test/", b"username:p@ss"),
+    ],
+)
+def test_publication_url_and_retries_use_the_configured_hub_endpoint(release, hub, endpoint, auth):
+    hub.endpoint = endpoint
+    publish(release, "unit-test/release", public=True)
+    result = publish(release, "unit-test/release", public=True)
+    assert result["url"] == f"https://hf.example.test/datasets/unit-test/release/tree/{hub.head}"
+    binding = read_json(release / "_state/hub_binding.json")
+    assert binding["endpoint"] == "https://hf.example.test"
+    assert hub.endpoint == "https://hf.example.test"
+    assert (hub.headers or {}).get("authorization") == (
+        "Basic " + b64encode(auth).decode("ascii") if auth else None
+    )
+    assert any(method == "hf_hub_download" for method, _ in hub.calls)
+    hub.endpoint = "https://another.example.test"
+    hub.calls.clear()
+    with pytest.raises(ValueError, match="different Hub target"):
+        publish(release, "unit-test/release", public=True)
+    assert hub.calls == []
+
+
+def test_legacy_hub_binding_can_resume_on_default_endpoint(release, hub):
+    publish(release, "unit-test/release", public=True)
+    binding_path = release / "_state/hub_binding.json"
+    binding = read_json(binding_path)
+    binding.pop("endpoint")
+    atomic_json(binding_path, binding)
+
+    hub.endpoint = "https://another.example.test"
+    with pytest.raises(ValueError, match="different Hub target"):
+        publish(release, "unit-test/release", public=True)
+    hub.endpoint = "https://huggingface.co"
+    assert publish(release, "unit-test/release", public=True)["commit_sha"] == hub.head
+    assert read_json(binding_path)["endpoint"] == hub.endpoint
+
+
 def test_mismatched_remote_intent_rejected(release, hub):
     publish(release, "unit-test/release", public=True)
     hub.commit(hub.head, {"_PUBLICATION.json": b"{}"})
     with pytest.raises(ValueError, match="different provenance or content"):
         publish(release, "unit-test/release", public=True)
+
+
+def test_retry_checks_current_remote_intent_when_the_sdk_cache_has_matching_bytes(release, hub):
+    publish(release, "unit-test/release", public=True)
+    verified_intent = hub.trees[hub.head]["_PUBLICATION.json"]
+    hub.commit(hub.head, {"_PUBLICATION.json": b"{}"})
+    changed_head = hub.head
+    cached = hub.cache / changed_head / "_PUBLICATION.json"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(verified_intent)
+
+    with pytest.raises(ValueError, match="different provenance or content"):
+        publish(release, "unit-test/release", public=True)
+    assert hub.head == changed_head
+    assert cached.read_bytes() == verified_intent
 
 
 def test_stale_validation_report_is_never_trusted(release, hub, monkeypatch):
@@ -379,6 +500,23 @@ def test_missing_branch_is_reported_before_upload(release, hub, monkeypatch):
     with pytest.raises(ValueError, match="create the branch"):
         publish(release, "unit-test/release", public=True, revision="missing")
     assert hub.head == "initial"
+
+
+@pytest.mark.parametrize("revision", ["v1.0", "refs/tags/v1.0", "a" * 40])
+def test_readable_non_branch_revision_does_not_bind_the_release(release, hub, revision):
+    with pytest.raises(ValueError, match="revision must name an existing branch"):
+        publish(release, "unit-test/release", public=True, revision=revision)
+    assert hub.head == "initial"
+    assert not (release / "_state/hub_binding.json").exists()
+    assert not (release / "_PUBLICATION.json").exists()
+    assert publish(release, "unit-test/release", public=True)["commit_sha"] == hub.head
+
+
+def test_publication_accepts_existing_non_default_branch(release, hub):
+    hub.branches.append("releases/v1")
+    result = publish(release, "unit-test/release", public=True, revision="releases/v1")
+    assert result["commit_sha"] == hub.head
+    assert result["revision"] == "releases/v1"
 
 
 def test_missing_remote_head_is_rejected_before_mutation(release, hub, monkeypatch):

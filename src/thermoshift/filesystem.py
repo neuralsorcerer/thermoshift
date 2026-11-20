@@ -12,20 +12,26 @@ import errno
 import hashlib
 import json
 import os
+import stat
 import tempfile
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
-# os.path.isjunction arrived in Python 3.12 and is always False away from
-# Windows. A junction redirects like a symlink, but is_symlink() does not report
-# one, so without this a release on Windows would write straight through it.
-# Python 3.11 on Windows has no way to ask, and keeps the older behavior.
-_isjunction = getattr(os.path, "isjunction", None)
+# Windows exposes the junction tag through lstat even on Python 3.11, which
+# predates os.path.isjunction.
+_JUNCTION_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
 
 
-def _redirects(path: Path) -> bool:
+def is_redirected(path: Path) -> bool:
     """Report a symlink, or on Windows a junction, at this exact path."""
-    return path.is_symlink() or (_isjunction is not None and _isjunction(path))
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISLNK(info.st_mode) or (
+        _JUNCTION_TAG is not None and getattr(info, "st_reparse_tag", None) == _JUNCTION_TAG
+    )
 
 
 def dataset_path(root: str | Path, relative: str | Path) -> Path:
@@ -40,20 +46,54 @@ def dataset_path(root: str | Path, relative: str | Path) -> Path:
     # Reject on the anchor rather than is_absolute(): on Windows "/data" carries
     # no drive and is not absolute, yet joining it resets to the drive root and
     # leaves the release entirely. "C:data" is drive-relative the same way.
-    if relative.anchor or ".." in relative.parts:
+    if relative.anchor or any(part == ".." or Path(part).anchor for part in relative.parts):
         raise ValueError("dataset paths must be relative to the dataset directory")
     path = Path(root)
     for part in relative.parts:
         path /= part
-        if _redirects(path):
+        if is_redirected(path):
             raise ValueError(f"symlinks and junctions are not allowed in dataset paths: {relative}")
     return path
 
 
+def dataset_parquet_paths(root: Path) -> set[str]:
+    """List Parquet paths in the data tree, failing on redirects or unreadable entries."""
+    data = dataset_path(root, "data")
+    if not data.exists():
+        return set()
+
+    def raise_scan_error(error):
+        raise error
+
+    files = set()
+    for parent, directories, names in os.walk(data, onerror=raise_scan_error):
+        for name in chain(directories, names):
+            path = Path(parent, name)
+            if is_redirected(path):
+                raise ValueError("symlinks and junctions are not allowed under data/")
+            if path.match("*.parquet"):
+                files.add(path.relative_to(root).as_posix())
+    return files
+
+
+def require_regular_file(path: Path, *, missing_ok: bool = False) -> None:
+    """Reject directories and special files before opening a dataset file."""
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"expected a regular file at {path}")
+
+
 def sha256(path: str | Path) -> str:
     """Return the SHA-256 digest of a file without loading it into memory."""
+    path = Path(path)
+    require_regular_file(path)
     h = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    with path.open("rb") as handle:
         for block in iter(lambda: handle.read(8 << 20), b""):
             h.update(block)
     return h.hexdigest()
@@ -98,4 +138,9 @@ def atomic_json(path: str | Path, value: Any) -> None:
 
 def read_json(path: str | Path) -> Any:
     """Read a UTF-8 JSON document."""
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    path = Path(path)
+    require_regular_file(path)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except RecursionError as error:
+        raise ValueError(f"JSON nesting exceeds the parser limit in {path}") from error

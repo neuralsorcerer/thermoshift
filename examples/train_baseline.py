@@ -10,6 +10,8 @@ import argparse
 import json
 
 from thermoshift.baseline import train_baseline
+from thermoshift.filesystem import atomic_json
+from thermoshift.provenance import experiment_report_path
 
 
 def main():
@@ -19,11 +21,13 @@ def main():
     p.add_argument("--max-eval", type=int, default=100000)
     p.add_argument("--report")
     args = p.parse_args()
+    try:
+        report = experiment_report_path(args.report, args.data) if args.report else None
+    except ValueError as error:
+        p.error(str(error))
     result = train_baseline(args.data, args.max_train, args.max_eval)
-    if args.report:
-        from thermoshift.filesystem import atomic_json
-
-        atomic_json(args.report, result)
+    if report is not None:
+        atomic_json(report, result)
     print(json.dumps(result, indent=2))
 
 

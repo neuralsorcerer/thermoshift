@@ -12,7 +12,7 @@ import numpy as np
 import pyarrow as pa
 
 
-def array(table: pa.Table, name: str) -> np.ndarray:
+def array(table: pa.Table | pa.RecordBatch, name: str) -> np.ndarray:
     return table[name].to_numpy(zero_copy_only=False)
 
 

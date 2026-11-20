@@ -38,7 +38,8 @@ Reduce `--batch-buildings` or worker count when memory is constrained.
 Shard size controls file size and the amount of work rebuilt after interruption.
 It is fixed at initialization. Smaller shards expose more independent jobs and
 produce more files. Workers are capped by the number of shards assigned to the
-current rank. A single assigned shard runs in the calling process.
+current rank and by the 61-worker process pool limit on Windows. A single
+assigned shard runs in the calling process.
 
 Use the [benchmark script](https://github.com/neuralsorcerer/thermoshift/blob/main/benchmarks/README.md) to measure a representative run.
 For one billion decisions with default episode and shard sizes, the configuration
@@ -52,8 +53,11 @@ files is regenerated. Changing worker count or batch size preserves numeric reco
 changing row-group boundaries can change the compressed file bytes.
 
 A shard becomes committed after its Parquet files are closed, flushed, renamed,
-and described by an atomic state file. Finalization checks every shard and writes
-the release manifest, dataset card, and completion marker.
+and described by an atomic state file. On filesystems that support directory
+flushing, initialization flushes the dataset path before saving the plan, and
+generation flushes partition directory entries before committing the state file.
+Finalization checks every shard and writes the release manifest, dataset card,
+and completion marker.
 Refinalizing clears the previous completion marker and validation report before
 checking shards. If finalization fails, finish recovery and validate again before
 consuming the release.
